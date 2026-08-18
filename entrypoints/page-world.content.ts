@@ -21,15 +21,16 @@ export default defineContentScript({
       window.postMessage({ ns: NS, dir: 'up', topic, payload }, '*')
     }
 
-    /** 探测登录态：localStorage 中是否存在 userToken（JSON 包装） */
-    function detectAuth(): boolean {
+    /** 探测登录态并返回 userToken：localStorage 中 JSON 包装的 value */
+    function readUserToken(): string | null {
       try {
         const raw = window.localStorage.getItem('userToken')
-        if (!raw) return false
+        if (!raw) return null
         const parsed = JSON.parse(raw) as { value?: unknown }
-        return typeof parsed?.value === 'string' && parsed.value.length > 0
+        if (typeof parsed?.value === 'string' && parsed.value.length > 0) return parsed.value
+        return null
       } catch {
-        return false
+        return null
       }
     }
 
@@ -45,15 +46,17 @@ export default defineContentScript({
         const payload = (data as { payload?: unknown }).payload as
           | { cmd?: string; args?: unknown }
           | undefined
-        // Wave 1 在此路由 CMD_SEND_MESSAGE / CMD_STOP_STREAM / CMD_READ_TOKEN
-        void payload
+        if (payload?.cmd === 'read-token') {
+          // 应 SW 请求回传最新 token
+          postUp('page-ready', { authPresent: Boolean(readUserToken()), token: readUserToken(), url: location.href })
+        }
       }
     })
 
     // 注入完成即上报（document_start 时 localStorage 可能尚未就绪，做一次延时确认）
-    const report = () => postUp('page-ready', { authPresent: detectAuth(), url: location.href })
+    const report = () => postUp('page-ready', { authPresent: Boolean(readUserToken()), token: readUserToken(), url: location.href })
     report()
-    // React 挂载 / 登录态变化后重报（简单轮询，Wave 1 用事件/MutationObserver 优化）
+    // React 挂载 / 登录态变化后重报（简单轮询，后续用事件/MutationObserver 优化）
     const timer = setInterval(() => {
       report()
     }, 3000)

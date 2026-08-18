@@ -99,3 +99,161 @@ body {
 .placeholder p {
   margin: 0 0 4px;
 }
+
+/* ── Wave 1 聊天 UI ─────────────────────────────────── */
+
+.error-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: #3a1f1f;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #e0a0a0;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: #e0a0a0;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.chat {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e2128;
+  border-radius: 8px;
+  padding: 12px;
+  min-height: 200px;
+}
+
+.chat__empty {
+  color: #6a7078;
+  font-size: 12px;
+  text-align: center;
+  margin: auto;
+}
+
+.msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.msg--user {
+  align-items: flex-end;
+}
+
+.msg--assistant {
+  align-items: flex-start;
+}
+
+.msg__role {
+  font-size: 11px;
+  color: #9aa0a8;
+  font-weight: 600;
+}
+
+.msg--user .msg__content {
+  background: #2b3a4a;
+  color: #d6e4f0;
+  border-radius: 10px 10px 2px 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 92%;
+}
+
+.msg--assistant .msg__content {
+  background: #2a2f3a;
+  color: #e6e8eb;
+  border-radius: 10px 10px 10px 2px;
+  padding: 8px 10px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 92%;
+}
+
+.thinking {
+  background: #23262e;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #8b93a1;
+  max-width: 92%;
+}
+
+.thinking summary {
+  cursor: pointer;
+  color: #9aa0a8;
+}
+
+.thinking__body {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #8b93a1;
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composer textarea {
+  width: 100%;
+  resize: vertical;
+  background: #1e2128;
+  border: 1px solid #333845;
+  border-radius: 8px;
+  color: #e6e8eb;
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  box-sizing: border-box;
+}
+
+.composer textarea:focus {
+  outline: none;
+  border-color: #4a5568;
+}
+
+.composer__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.btn {
+  border: none;
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn--primary {
+  background: #2b6cb0;
+  color: #fff;
+}
+
+.btn--primary:disabled {
+  background: #2a3441;
+  color: #6a7078;
+  cursor: not-allowed;
+}
+
+.btn--danger {
+  background: #a0392f;
+  color: #fff;
+}

@@ -34,6 +34,8 @@ export const TOPIC_PAGE_READY = 'page-ready'
 export interface PageReadyPayload {
   /** 页面是否已登录（localStorage 里是否存在 userToken） */
   authPresent: boolean
+  /** localStorage.userToken 的值（JSON 包装解出），未登录为 null */
+  token: string | null
   /** 当前页面 URL */
   url: string
 }
@@ -73,8 +75,17 @@ export const EXT_TOPIC_PAGE_EVENT = 'page-event'
 /** SW → side panel：页面状态更新 */
 export const EXT_TOPIC_PAGE_STATE = 'page-state'
 
+/** SW → side panel：桥接流事件（thinking/text/finish/error） */
+export const EXT_TOPIC_BRIDGE_EVENT = 'bridge-event'
+export interface BridgeEventMessage {
+  kind: 'thinking' | 'text' | 'finish' | 'error'
+  text?: string
+  error?: string
+}
+
 // ── 命令枚举（Wave 1 起使用）──────────────────────────────
 
 export const CMD_SEND_MESSAGE = 'send-message'
 export const CMD_STOP_STREAM = 'stop-stream'
 export const CMD_READ_TOKEN = 'read-token'
+export const CMD_OPEN_PANEL = 'open-panel'

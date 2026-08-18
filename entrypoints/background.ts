@@ -1,53 +1,135 @@
 /**
  * Background service worker —— 扩展中枢。
- * Wave 0 职责：
- * 1. 维护页面状态（authPresent / url），从 bridge 收 page-event
- * 2. 与 side panel 建立长 port（PANEL_PORT），把页面状态推给 UI
- * 3. 三种入口打开 side panel（工具图标 / 键盘命令 / bridge 请求）
- * Wave 1+ 在此扩展：桥接层调用、agent 状态机、任务队列。
+ * Wave 1 职责：
+ * 1. 维护页面状态与 userToken（MAIN world → bridge → SW）
+ * 2. 与 side panel 建立长 port，把页面状态与桥接流事件推给 UI
+ * 3. 编排 DeepSeekWebClient：收到 send-message → 流式调用 → 事件推送；stop-stream → abort
+ * 4. 三种入口打开 side panel（工具图标 / 键盘命令 / bridge 请求）
  */
-export default defineBackground(() => {
-  // ── 页面状态（MAIN world → bridge → SW）────────────────
-  let pageState = {
-    authPresent: false,
-    url: '',
-    connected: false,
-  }
+import { DeepSeekWebClient } from '@/utils/bridge/client'
+import type { Message } from '@/utils/bridge/protocol'
+import { PANEL_PORT, type BridgeEventMessage } from '@/utils/messages'
 
-  /** 通知所有已连接的 side panel */
-  function broadcastState() {
-    chrome.runtime.sendMessage({ topic: 'page-state', payload: pageState }).catch(() => {
-      // side panel 可能未打开，静默忽略
+interface PageState {
+  authPresent: boolean
+  token: string | null
+  url: string
+  connected: boolean
+}
+
+const INITIAL_STATE: PageState = { authPresent: false, token: null, url: '', connected: false }
+
+export default defineBackground(() => {
+  let pageState: PageState = { ...INITIAL_STATE }
+  // 会话内复用的 chat_session_id（多轮连续）
+  let currentSessionId: string | undefined
+  let activeStream: AbortController | null = null
+
+  const panelPorts = new Set<chrome.runtime.Port>()
+
+  /** 通知所有已连接 side panel */
+  function broadcast(topic: string, payload: unknown) {
+    for (const port of panelPorts) {
+      try {
+        port.postMessage({ topic, payload })
+      } catch {
+        // port 可能已断开
+      }
+    }
+    // 也通过 sendMessage 兜底（panel 可能只挂 onMessage）
+    chrome.runtime.sendMessage({ topic, payload }).catch(() => {
+      // 无监听者，静默
     })
   }
 
-  // bridge 上报（MAIN world 的 page-ready / 后续 sse-event 等）
+  function pushBridgeEvent(ev: BridgeEventMessage) {
+    broadcast('bridge-event', ev)
+  }
+
+  // ── 页面消息（bridge 上报 MAIN world 的 page-ready 等）──
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (typeof message !== 'object' || message === null) return
     const { topic } = message as { topic?: unknown }
+
     if (topic === 'page-event') {
       const payload = (message as { payload?: unknown }).payload as
         | { topic: string; payload?: unknown }
         | undefined
       if (payload?.topic === 'page-ready') {
-        const p = payload.payload as { authPresent: boolean; url: string }
+        const p = payload.payload as { authPresent: boolean; token: string | null; url: string }
         pageState = {
           authPresent: Boolean(p?.authPresent),
+          token: typeof p?.token === 'string' && p.token ? p.token : null,
           url: typeof p?.url === 'string' ? p.url : '',
           connected: true,
         }
-        broadcastState()
+        broadcast('page-state', pageState)
       }
-      // 支持来自 bridge 的异步响应（后续桥接层调用）
       sendResponse({ ok: true })
       return true
     }
+
     if (topic === 'open-panel') {
       void openSidePanel(sender.tab?.id)
       sendResponse({ ok: true })
       return
     }
+
+    // ── side panel 命令 ──────────────────────────────
+    if (topic === 'send-message') {
+      const { messages, reasoning } =
+        (message as { payload?: { messages: Message[]; reasoning?: boolean } }).payload ?? {}
+      void runStream(messages ?? [], reasoning ?? false)
+      sendResponse({ ok: true })
+      return
+    }
+    if (topic === 'stop-stream') {
+      activeStream?.abort()
+      activeStream = null
+      pushBridgeEvent({ kind: 'error', error: 'stopped' })
+      sendResponse({ ok: true })
+      return
+    }
+    if (topic === 'clear-session') {
+      currentSessionId = undefined
+      sendResponse({ ok: true })
+      return
+    }
   })
+
+  /** 流式聊天编排 */
+  async function runStream(messages: Message[], reasoning: boolean) {
+    if (!pageState.token) {
+      pushBridgeEvent({ kind: 'error', error: '未检测到登录态，请先登录 chat.deepseek.com' })
+      return
+    }
+    activeStream = new AbortController()
+    const client = new DeepSeekWebClient({ userToken: pageState.token })
+    try {
+      const stream = client.streamChat(messages, {
+        reasoning,
+        signal: activeStream.signal,
+        chatSessionId: currentSessionId,
+      })
+      for await (const ev of stream) {
+        if (ev.kind === 'thinking') {
+          pushBridgeEvent({ kind: 'thinking', text: ev.text })
+        } else if (ev.kind === 'text') {
+          pushBridgeEvent({ kind: 'text', text: ev.text })
+        } else if (ev.kind === 'finish') {
+          pushBridgeEvent({ kind: 'finish' })
+        }
+      }
+    } catch (err) {
+      if (activeStream?.signal.aborted) {
+        pushBridgeEvent({ kind: 'error', error: '已停止' })
+      } else {
+        pushBridgeEvent({ kind: 'error', error: err instanceof Error ? err.message : String(err) })
+      }
+    } finally {
+      activeStream = null
+    }
+  }
 
   async function openSidePanel(tabId?: number) {
     try {
@@ -75,21 +157,12 @@ export default defineBackground(() => {
   })
 
   // ── 长 port：side panel ↔ SW 保活 + 推送通道 ──────────
-  const panelPorts = new Set<chrome.runtime.Port>()
   chrome.runtime.onConnect.addListener((port) => {
-    if (port.name !== 'dsh-panel-port') return
+    if (port.name !== PANEL_PORT) return
     panelPorts.add(port)
-    port.onMessage.addListener((message) => {
-      // Wave 1+：SW 收到的面板命令（如 send-message）在此路由
-      void message
-    })
     port.onDisconnect.addListener(() => {
       panelPorts.delete(port)
     })
-    // 连接建立即推送当前状态
     port.postMessage({ topic: 'page-state', payload: pageState })
   })
-
-  // 供 side panel 主动拉取（若 port 尚未建立）
-  chrome.runtime.onConnect.addListener(() => {})
 })
