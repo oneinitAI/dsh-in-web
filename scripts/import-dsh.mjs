@@ -115,6 +115,18 @@ async function main() {
       console.log('[skip] @deepseek-ai/dsh-client-connection (replaced by custom bridge bundle)')
       continue
     }
+    // 浏览器扩展环境不适用的插件，剔除（避免加载失败/冲突/刷屏）：
+    //  - dsh-client-hmr：请求 /plugins/events dev SSE，扩展里 404 刷屏
+    //  - dsh-client-ui-directory-picker-native：与 browse 版互斥注册同一
+    //    single slot (conversation.hero.workspace.directoryFlow) → 冲突崩溃；
+    //    浏览器环境只保留 browse 版
+    if (
+      id === '@deepseek-ai/dsh-client-hmr' ||
+      id === '@deepseek-ai/dsh-client-ui-directory-picker-native'
+    ) {
+      console.log(`[skip] ${id} (browser-extension incompatible)`)
+      continue
+    }
     const clientPath = join(dir, 'lib', 'client.js')
     const content = await readFile(clientPath, 'utf8').catch(() => null)
     if (content === null) {

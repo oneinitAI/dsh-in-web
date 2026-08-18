@@ -744,6 +744,39 @@ export default defineBackground(() => {
     // credentials.describe / subagent.list：对应面板启动即调用，返回空数据
     'credentials.describe': () => ({ ok: true, value: { credentials: {} } }),
     'subagent.list': () => ({ ok: true, value: { entries: [], parentAvailable: true } }),
+    // dynamicCordisRunner.*：本扩展不实现动态插件运行（Cordis 面板启动即调用
+    // inventory / syncInspectManifest 显示插件清单），全部返回空/成功状态，
+    // 让面板显示空清单而非「无法加载」错误。错误包络方法仅在真有动态插件
+    // 运行时才可能被调用，届时 UI 显示错误但面板不崩。
+    'dynamicCordisRunner/inventory': () => ({ ok: true, value: [] }),
+    'dynamicCordisRunner/syncInspectManifest': () => ({ ok: true, value: null }),
+    'dynamicCordisRunner/getClientCode': () => dshDynamicNotBridged('dynamicCordisRunner/getClientCode'),
+    'dynamicCordisRunner/invoke': () => dshDynamicNotBridged('dynamicCordisRunner/invoke'),
+    'dynamicCordisRunner/runHostHalf': () => ({
+      ok: true,
+      value: { ok: false, message: 'dynamic plugin host half not available in dsh-in-web' },
+    }),
+    'dynamicCordisRunner/resolveRequestRun': () => ({ ok: true, value: { accepted: false } }),
+    'dynamicCordisRunner/resolveInspectQuery': () => ({ ok: true, value: { accepted: false } }),
+    'dynamicCordisRunner/settleUserRun': () => ({
+      ok: true,
+      value: { ok: false, reason: 'plugin-missing', message: 'no dynamic plugin running in dsh-in-web' },
+    }),
+    'dynamicCordisRunner/stopFromPanel': () => ({ ok: true, value: { ok: true } }),
+    'dynamicCordisRunner/undefineFromPanel': () => ({
+      ok: true,
+      value: { ok: false, reason: 'plugin-missing', message: 'no dynamic plugin defined in dsh-in-web' },
+    }),
+    'dynamicCordisRunner/reportClientGuardFailure': () => ({ ok: true, value: null }),
+    'dynamicCordisRunner/reportRenderFailure': () => ({ ok: true, value: null }),
+  }
+
+  /** 未桥接的 dynamicCordisRunner 方法：返回合法错误包络（与 dshNotImplemented 同构） */
+  function dshDynamicNotBridged(method: string): DshRpcResult {
+    return {
+      ok: false,
+      error: { code: 'internal', message: `dsh RPC not yet bridged: ${method}`, details: {} },
+    }
   }
 
   async function handleDshRpc(message: DshRpcEnvelope): Promise<DshRpcReply> {
