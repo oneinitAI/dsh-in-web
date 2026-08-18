@@ -982,6 +982,214 @@ export default defineBackground(() => {
     }
   }
 
+  // ── goal.*（chrome.storage.local 真实持久化）──────────────────────
+  // 官方 goal domain：request 携带 { sessionId, ref?: {id, revision},
+  //   objective?, maxGoalRounds? }；value 为 { ref: {id, revision} }
+  //   （create/edit/pause/resume/complete）或 { cleared: true }（clear）。
+  // 以 dsh-goals key 存 Record<sessionId, Array<DshGoalRecord>>，让目标
+  // 面板的 create → edit/pause/resume/complete/clear 全链路可真实操作。
+  const DSH_GOALS_KEY = 'dsh-goals'
+
+  type DshGoalStatus = 'active' | 'paused' | 'completed'
+
+  interface DshGoalRecord {
+    id: string
+    revision: number
+    objective: string
+    maxGoalRounds?: number
+    status: DshGoalStatus
+    updatedAt: string
+  }
+
+  type DshGoalsStore = Record<string, DshGoalRecord[]>
+
+  async function readGoals(): Promise<DshGoalsStore> {
+    try {
+      const stored = await chrome.storage.local.get(DSH_GOALS_KEY)
+      const raw = stored[DSH_GOALS_KEY]
+      return typeof raw === 'object' && raw !== null ? (raw as DshGoalsStore) : {}
+    } catch {
+      return {}
+    }
+  }
+
+  async function writeGoals(store: DshGoalsStore): Promise<void> {
+    try {
+      await chrome.storage.local.set({ [DSH_GOALS_KEY]: store })
+    } catch {
+      // 写失败静默（非扩展环境）
+    }
+  }
+
+  let goalSeq = 0
+  function mintGoalId(): string {
+    goalSeq += 1
+    return `goal-${Date.now()}-${goalSeq}`
+  }
+
+  /** rpcErrorSchema 无 goal-not-found 专用码，缺失统一 internal + details:{} */
+  function dshGoalNotFound(): DshRpcResult {
+    return { ok: false, error: { code: 'internal', message: 'goal not found', details: {} } }
+  }
+
+  async function findGoalRecord(
+    sessionId: string,
+    id: string,
+  ): Promise<{ store: DshGoalsStore; goals: DshGoalRecord[]; record: DshGoalRecord; index: number } | null> {
+    const store = await readGoals()
+    const goals = store[sessionId] ?? []
+    const index = goals.findIndex((g) => g.id === id)
+    if (index < 0) return null
+    return { store, goals, record: goals[index]!, index }
+  }
+
+  function goalSessionId(payload: unknown): string {
+    const p = (payload ?? {}) as { sessionId?: unknown }
+    return typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : ''
+  }
+
+  function goalRefId(payload: unknown): string {
+    const p = (payload ?? {}) as { ref?: unknown }
+    const ref = (p.ref ?? {}) as { id?: unknown }
+    return typeof ref.id === 'string' && ref.id ? ref.id : ''
+  }
+
+  function goalMaxRounds(payload: unknown): number | undefined {
+    const p = (payload ?? {}) as { maxGoalRounds?: unknown }
+    return typeof p.maxGoalRounds === 'number' && Number.isInteger(p.maxGoalRounds) && p.maxGoalRounds > 0
+      ? p.maxGoalRounds
+      : undefined
+  }
+
+  async function dshGoalCreate(payload: unknown): Promise<DshRpcResult> {
+    const sessionId = goalSessionId(payload)
+    if (!sessionId) {
+      return { ok: false, error: { code: 'bad-request', message: 'goal.create: sessionId required', details: {} } }
+    }
+    const p = (payload ?? {}) as { objective?: unknown }
+    const objective = typeof p.objective === 'string' ? p.objective : ''
+    const maxGoalRounds = goalMaxRounds(payload)
+    const store = await readGoals()
+    const goals = store[sessionId] ?? []
+    const record: DshGoalRecord = {
+      id: mintGoalId(),
+      revision: 1,
+      objective,
+      ...(maxGoalRounds !== undefined ? { maxGoalRounds } : {}),
+      status: 'active',
+      updatedAt: new Date().toISOString(),
+    }
+    goals.push(record)
+    store[sessionId] = goals
+    await writeGoals(store)
+    return { ok: true, value: { ref: { id: record.id, revision: record.revision } } }
+  }
+
+  async function dshGoalEdit(payload: unknown): Promise<DshRpcResult> {
+    const found = await findGoalRecord(goalSessionId(payload), goalRefId(payload))
+    if (!found) return dshGoalNotFound()
+    const p = (payload ?? {}) as { objective?: unknown }
+    if (typeof p.objective === 'string') found.record.objective = p.objective
+    const maxGoalRounds = goalMaxRounds(payload)
+    if (maxGoalRounds !== undefined) found.record.maxGoalRounds = maxGoalRounds
+    found.record.revision += 1
+    found.record.updatedAt = new Date().toISOString()
+    await writeGoals(found.store)
+    return { ok: true, value: { ref: { id: found.record.id, revision: found.record.revision } } }
+  }
+
+  async function dshGoalSetStatus(payload: unknown, status: DshGoalStatus): Promise<DshRpcResult> {
+    const found = await findGoalRecord(goalSessionId(payload), goalRefId(payload))
+    if (!found) return dshGoalNotFound()
+    found.record.status = status
+    found.record.revision += 1
+    found.record.updatedAt = new Date().toISOString()
+    await writeGoals(found.store)
+    return { ok: true, value: { ref: { id: found.record.id, revision: found.record.revision } } }
+  }
+
+  async function dshGoalClear(payload: unknown): Promise<DshRpcResult> {
+    const found = await findGoalRecord(goalSessionId(payload), goalRefId(payload))
+    if (!found) return dshGoalNotFound()
+    found.goals.splice(found.index, 1)
+    if (found.goals.length === 0) delete found.store[goalSessionId(payload)]
+    else found.store[goalSessionId(payload)] = found.goals
+    await writeGoals(found.store)
+    return { ok: true, value: { cleared: true } }
+  }
+
+  // ── credentials.*（chrome.storage.local 真实存储，describe 读回）──
+  const DSH_CREDENTIALS_KEY = 'dsh-credentials'
+
+  async function readCredentials(): Promise<Record<string, unknown>> {
+    try {
+      const stored = await chrome.storage.local.get(DSH_CREDENTIALS_KEY)
+      const raw = stored[DSH_CREDENTIALS_KEY]
+      return typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
+    } catch {
+      return {}
+    }
+  }
+
+  async function writeCredentials(creds: Record<string, unknown>): Promise<void> {
+    try {
+      await chrome.storage.local.set({ [DSH_CREDENTIALS_KEY]: creds })
+    } catch {
+      // 写失败静默（非扩展环境）
+    }
+  }
+
+  function credentialsRef(payload: unknown): string {
+    const p = (payload ?? {}) as { ref?: unknown }
+    return typeof p.ref === 'string' && p.ref ? p.ref : ''
+  }
+
+  async function dshCredentialsSet(payload: unknown): Promise<DshRpcResult> {
+    const ref = credentialsRef(payload)
+    if (!ref) {
+      return { ok: false, error: { code: 'bad-request', message: 'credentials.set: ref required', details: {} } }
+    }
+    const p = (payload ?? {}) as { value?: unknown }
+    const creds = await readCredentials()
+    creds[ref] = p.value ?? {}
+    await writeCredentials(creds)
+    return { ok: true, value: {} }
+  }
+
+  async function dshCredentialsUnset(payload: unknown): Promise<DshRpcResult> {
+    const ref = credentialsRef(payload)
+    if (!ref) {
+      return { ok: false, error: { code: 'bad-request', message: 'credentials.unset: ref required', details: {} } }
+    }
+    const creds = await readCredentials()
+    delete creds[ref]
+    await writeCredentials(creds)
+    return { ok: true, value: {} }
+  }
+
+  /** credentials.describe：读回 dsh-credentials 存储，每个已存 ref 标记 configured+writable */
+  async function dshCredentialsDescribe(): Promise<DshRpcResult> {
+    const creds = await readCredentials()
+    const credentials: Record<string, { configured: boolean; writable: boolean }> = {}
+    for (const ref of Object.keys(creds)) {
+      credentials[ref] = { configured: true, writable: true }
+    }
+    return { ok: true, value: { credentials } }
+  }
+
+  // ── llm.discoverModels（真实 deepseek 模型目录）──────────────────
+  function dshLlmDiscoverModels(): DshRpcResult {
+    return {
+      ok: true,
+      value: {
+        models: [
+          { id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', contextWindow: 1000000, maxTokens: 1000000 },
+          { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', contextWindow: 1000000, maxTokens: 1000000 },
+        ],
+      },
+    }
+  }
+
   // ── 分派表（未列出的方法回落到 dshNotImplemented 错误包络）────────
   const dshRpcHandlers: Record<string, DshRpcHandler> = {
     'host.describe': () => ({ ok: true, value: dshDescribeValue() }),
@@ -1042,8 +1250,8 @@ export default defineBackground(() => {
     'agentPreset.copy': dshAgentPresetCopy,
     'agentPreset.openDocument': dshAgentPresetOpenDocument,
     'agentPreset.remove': dshAgentPresetRemove,
-    // credentials.describe / subagent.list：对应面板启动即调用，返回空数据
-    'credentials.describe': () => ({ ok: true, value: { credentials: {} } }),
+    // credentials.describe：读回 dsh-credentials 真实存储（set/unset 后能反映）
+    'credentials.describe': dshCredentialsDescribe,
     'subagent.list': () => ({ ok: true, value: { entries: [], parentAvailable: true } }),
     // pluginInventory.list：dsh-client-ui-settings-plugin-inventory 的「插件」设置页
     // 经 ctx.remote.pluginInventory.list() 调用（wire method = pluginInventory.list，
@@ -1076,6 +1284,32 @@ export default defineBackground(() => {
     }),
     'dynamicCordisRunner/reportClientGuardFailure': () => ({ ok: true, value: null }),
     'dynamicCordisRunner/reportRenderFailure': () => ({ ok: true, value: null }),
+    // goal.*：chrome.storage.local 真实持久化（create → edit/pause/resume/complete/clear 全链路可操作）
+    'goal.create': dshGoalCreate,
+    'goal.edit': dshGoalEdit,
+    'goal.pause': (payload) => dshGoalSetStatus(payload, 'paused'),
+    'goal.resume': (payload) => dshGoalSetStatus(payload, 'active'),
+    'goal.complete': (payload) => dshGoalSetStatus(payload, 'completed'),
+    'goal.clear': dshGoalClear,
+    // credentials.set/unset：chrome.storage.local 真实存储
+    'credentials.set': dshCredentialsSet,
+    'credentials.unset': dshCredentialsUnset,
+    // session.attachment：需真实附件文件服务，保持错误包络（UI 显示干净错误）
+    'session.attachment': () => dshNotImplemented('session.attachment'),
+    // session.updateQueue：ack（会话队列操作，桥接层无真实队列）
+    'session.updateQueue': () => ({ ok: true, value: { accepted: true } }),
+    // subagent.*：本扩展无子代理运行——history 返回空事件流（hasMore false），
+    // prompt 错误包络（需真实子代理运行），interrupt ack
+    'subagent.history': () => ({ ok: true, value: { events: [], hasMore: false } }),
+    'subagent.prompt': () => dshNotImplemented('subagent.prompt'),
+    'subagent.interrupt': () => ({ ok: true, value: { accepted: true } }),
+    // host.openPath：浏览器无法打开本地路径（host.describe 的 canOpenPath=false）
+    'host.openPath': () => ({
+      ok: false,
+      error: { code: 'internal', message: 'host.openPath unavailable in browser', details: {} },
+    }),
+    // llm.discoverModels：返回真实 deepseek 模型目录（与 official llm-deepseek.models 一致）
+    'llm.discoverModels': dshLlmDiscoverModels,
   }
 
   /** 未桥接的 dynamicCordisRunner 方法：返回合法错误包络（与 dshNotImplemented 同构） */
