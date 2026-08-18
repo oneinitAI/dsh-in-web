@@ -51,7 +51,7 @@ function query<T>(cmd: 'list-files' | 'read-file' | 'list-skills', path?: string
  * 标签页：会话（流式聊天）/ 文件树（虚拟工作区浏览）/ skill 库 / 提示词编辑器。
  */
 export function App() {
-  const [tab, setTab] = useState<Tab>('chat')
+  const [tab, setTab] = useState<Tab>('settings')
   const [state, setState] = useState<PageState>(INITIAL)
   const [portState, setPortState] = useState<'connecting' | 'open' | 'closed'>('connecting')
   const [turns, setTurns] = useState<ChatTurn[]>([])
@@ -281,21 +281,26 @@ export function App() {
           )}
 
           <div className="chat" ref={scrollRef}>
-            {turns.length === 0 && (
-              <div className="chat__empty">在 chat.deepseek.com 登录后，在这里发消息测试网页版桥接。</div>
-            )}
-            {turns.map((t, i) => (
-              <div key={i} className={`msg msg--${t.role}`}>
-                <div className="msg__role">{t.role === 'user' ? '你' : 'DSH'}</div>
-                {t.thinking && (
-                  <details className="thinking" open={false}>
-                    <summary>思考</summary>
-                    <div className="thinking__body">{t.thinking}</div>
-                  </details>
-                )}
-                <div className="msg__content">{t.content || (i === turns.length - 1 && streaming ? '…' : '')}</div>
-              </div>
-            ))}
+            <div className="msg-column">
+              {turns.length === 0 && (
+                <div className="chat__empty">在 chat.deepseek.com 登录后，在这里发消息测试网页版桥接。</div>
+              )}
+              {turns.map((t, i) => (
+                <div key={i} className={`msg msg--${t.role}`}>
+                  {t.thinking && (
+                    <details
+                      className="thinking"
+                      open={false}
+                      data-state={i === turns.length - 1 && streaming ? 'running' : undefined}
+                    >
+                      <summary>思考过程</summary>
+                      <div className="thinking__body">{t.thinking}</div>
+                    </details>
+                  )}
+                  <div className="msg__content">{t.content || (i === turns.length - 1 && streaming ? '…' : '')}</div>
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="composer">
@@ -315,8 +320,10 @@ export function App() {
               {streaming ? (
                 <button className="btn btn--danger" onClick={stop}>停止</button>
               ) : (
-                <button className="btn btn--primary" onClick={send} disabled={!state.authPresent || !input.trim()}>
-                  发送
+                <button className="send-btn" onClick={send} disabled={!state.authPresent || !input.trim()} aria-label="发送">
+                  <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M3 8l10-5-3.5 9L8 8 3 8z" fill="currentColor" />
+                  </svg>
                 </button>
               )}
             </div>

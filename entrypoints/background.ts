@@ -308,4 +308,125 @@ export default defineBackground(() => {
     })
     port.postMessage({ topic: 'page-state', payload: pageState })
   })
+
+  // ===== dsh UI bridge skeleton =====
+  // dsh UI（public/dsh-web iframe）经 chrome.runtime 与本 SW 通信，协议预先约定：
+  //  - unary：iframe sendMessage({ kind: 'dsh-rpc', method, body: ClientRequest 全形 })，
+  //    本端回 { kind: 'dsh-rpc:result', body: ServerResponse 全形 }，rpcId 原样回显（client 校验 echo）
+  //  - stream：iframe connect({ name: 'dsh-stream' })，订阅 { kind: 'dsh-stream-subscribe', stream }，
+  //    本端回 { kind: 'dsh-stream-ok', body: { stream } }
+  // 线格式对齐 deepseek-harness apiproxy 的 rpc.schema.js（serverResponseSchema / rpcErrorSchema）
+
+  interface DshClientRequest {
+    readonly type: 'client-request'
+    readonly rpcId: string
+    readonly method: string
+    readonly payload?: unknown
+  }
+
+  /** rpcErrorSchema 要求 code/message/details 三字段（details 必填）；当前骨架只产出 code='internal' */
+  interface DshRpcError {
+    readonly code: string
+    readonly message: string
+    readonly details: Readonly<Record<string, never>>
+  }
+
+  type DshRpcResult =
+    | { readonly ok: true; readonly value: unknown }
+    | { readonly ok: false; readonly error: DshRpcError }
+
+  interface DshServerResponse {
+    readonly type: 'server-response'
+    readonly rpcId: string
+    readonly result: DshRpcResult
+  }
+
+  interface DshRpcReply {
+    readonly kind: 'dsh-rpc:result'
+    readonly body: DshServerResponse
+  }
+
+  interface DshRpcEnvelope {
+    readonly kind: 'dsh-rpc'
+    readonly method?: unknown
+    readonly body?: unknown
+  }
+
+  function isDshRpcEnvelope(message: unknown): message is DshRpcEnvelope {
+    return (
+      typeof message === 'object' &&
+      message !== null &&
+      (message as { kind?: unknown }).kind === 'dsh-rpc'
+    )
+  }
+
+  function isDshClientRequest(body: unknown): body is DshClientRequest {
+    if (typeof body !== 'object' || body === null) return false
+    const b = body as { type?: unknown; rpcId?: unknown; method?: unknown }
+    return b.type === 'client-request' && typeof b.rpcId === 'string' && typeof b.method === 'string'
+  }
+
+  /** 组装 ServerResponse 全形（rpcId 必须回显，client 端校验一致） */
+  function dshResponse(rpcId: string, result: DshRpcResult): DshServerResponse {
+    return { type: 'server-response', rpcId, result }
+  }
+
+  /** host.describe 最小可用桩（对齐 hostDescribeValueSchema：version+cwd 必填，attachedSessions 为 int >= 0） */
+  function dshDescribeValue(): { version: string; cwd: string; attachedSessions: number; canOpenPath: boolean } {
+    return { version: '0.0.0-dsh-in-web-bridge', cwd: '<dsh-in-web>', attachedSessions: 0, canOpenPath: false }
+  }
+
+  /** 未桥接方法：返回合法错误包络，让 UI 显示干净错误而非崩溃 */
+  function dshNotImplemented(method: string): DshRpcResult {
+    return { ok: false, error: { code: 'internal', message: `dsh RPC not yet bridged: ${method}`, details: {} } }
+  }
+
+  async function handleDshRpc(message: DshRpcEnvelope): Promise<DshRpcReply> {
+    if (!isDshClientRequest(message.body)) {
+      return {
+        kind: 'dsh-rpc:result',
+        body: dshResponse('', {
+          ok: false,
+          error: { code: 'internal', message: 'dsh RPC malformed request', details: {} },
+        }),
+      }
+    }
+    const req = message.body
+    const result: DshRpcResult =
+      req.method === 'host.describe' ? { ok: true, value: dshDescribeValue() } : dshNotImplemented(req.method)
+    return { kind: 'dsh-rpc:result', body: dshResponse(req.rpcId, result) }
+  }
+
+  // unary RPC：listener 返回 Promise 即作为响应（MV3 支持）
+  chrome.runtime.onMessage.addListener((message: unknown) => {
+    if (!isDshRpcEnvelope(message)) return undefined
+    return handleDshRpc(message)
+  })
+
+  // ── dsh 流（mux / host）骨架：保持端口打开、响应订阅、断线清理 ──
+  const dshStreamPorts = new Set<chrome.runtime.Port>()
+
+  interface DshStreamSubscribe {
+    readonly kind: 'dsh-stream-subscribe'
+    readonly stream: 'mux' | 'host'
+  }
+
+  function isDshStreamSubscribe(msg: unknown): msg is DshStreamSubscribe {
+    if (typeof msg !== 'object' || msg === null) return false
+    const m = msg as { kind?: unknown; stream?: unknown }
+    return m.kind === 'dsh-stream-subscribe' && (m.stream === 'mux' || m.stream === 'host')
+  }
+
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== 'dsh-stream') return
+    dshStreamPorts.add(port)
+    port.onMessage.addListener((msg: unknown) => {
+      if (!isDshStreamSubscribe(msg)) return
+      // 骨架阶段不推送任何 frame（NOT-IMPLEMENTED frame 可能破坏客户端 gap 检测），仅保持端口打开
+      port.postMessage({ kind: 'dsh-stream-ok', body: { stream: msg.stream } })
+    })
+    port.onDisconnect.addListener(() => {
+      dshStreamPorts.delete(port)
+    })
+  })
 })

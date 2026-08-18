@@ -1,8 +1,8 @@
 {
   "name": "dsh-in-web",
   "description": "把 chat.deepseek.com 网页版改造成 dsh（DeepSeek Harness）形态的 Chrome 浏览器扩展",
-  "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=20"

@@ -6,3 +6,8 @@ node_modules/
 .DS_Store
 .omo/evidence/
 .omo/run-continuation
+
+# dsh 官方前端产物（由 scripts/import-dsh.mjs 从本地 deepseek-harness 同步生成，含 40MB+ sourcemap，不入库）
+public/dsh-web/
+# 调试临时产物
+debug-*.mjs
