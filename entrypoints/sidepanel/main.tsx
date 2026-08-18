@@ -1,16 +1,38 @@
 // dsh-in-web side panel host.
 //
-// side panel 永远是开关/设置页（App.tsx）：
-//   - dshMode 开关在 App.tsx 的「设置」标签里控制
-//   - 打开 dsh 模式只影响 chat.deepseek.com 网页上的对话界面
-//     （dsh-ui.content.ts 注入的全屏 dsh iframe），side panel 自身不变
-//   - 网页注入路径（?embed=1）由 App.tsx 内部的 IS_EMBEDDED 退出按钮负责；
-//     side panel 自身打开的页面没有 ?embed=1，因此不显示退出按钮——关闭
-//     dsh 模式直接在设置页操作开关即可。
+// 两种呈现模式（按 URL 分流）：
+//   - ?embed=1（dsh-ui.content.ts 在 chat.deepseek.com 注入的全屏 iframe）：
+//     渲染官方 dsh harness（dsh-web/index.html）+ 浮层「退出 dsh 模式」按钮。
+//   - 否则（side panel 自身打开）：渲染 App.tsx 设置/开关页——
+//     dshMode 开关在这里控制，开启后网页对话界面切换为 dsh harness 形态，
+//     side panel 自身保持开关页不变。
 
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import './style.css'
+import { patchSettings } from '@/utils/settings/settings'
+
+/** 网页注入模式（dsh-ui.content.ts 注入的 URL 带 ?embed=1） */
+const IS_EMBEDDED = typeof location !== 'undefined' && location.search.includes('embed=1')
+
+/** 网页注入模式：全屏官方 dsh harness + 浮层退出按钮 */
+function EmbedRoot() {
+  return (
+    <div className="dsh-panel-host">
+      <iframe
+        className="dsh-panel-host__frame"
+        src={chrome.runtime.getURL('dsh-web/index.html')}
+        aria-label="dsh panel"
+      />
+      <button
+        className="btn btn--danger dsh-panel-host__exit"
+        onClick={() => void patchSettings({ dshMode: 'off' })}
+      >
+        退出 dsh 模式
+      </button>
+    </div>
+  )
+}
 
 const root = document.getElementById('root')!
-createRoot(root).render(<App />)
+createRoot(root).render(IS_EMBEDDED ? <EmbedRoot /> : <App />)
