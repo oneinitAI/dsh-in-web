@@ -70,6 +70,8 @@ export interface StreamChatOptions extends ClientOptions {
   chatSessionId?: string
   /** 用现成 accessToken 作为 Bearer（若已换取） */
   accessToken?: string
+  /** 本次实际使用的 chat_session_id 回调（新建或复用）——供调用方持久化会话 */
+  onSessionId?: (sessionId: string) => void
 }
 
 const COMPLETION_TARGET_PATH = ENDPOINTS.chatCompletion
@@ -159,6 +161,7 @@ export class DeepSeekWebClient {
     // 优先用调用方传入的 accessToken；否则 userToken → accessToken（~1h 有效）
     const accessToken = opts.accessToken ?? (await this.currentUser({ fetcher, signal: opts.signal }))
     const chatSessionId = opts.chatSessionId ?? (await this.createChatSession({ fetcher, signal: opts.signal, accessToken }))
+    opts.onSessionId?.(chatSessionId)
 
     // 主动 PoW（对齐 web 客户端行为）
     const challenge = await this.fetchPowChallenge(fetcher, opts, accessToken)

@@ -70,22 +70,26 @@ export default defineContentScript({
       const controller = new AbortController()
       activeStreams.set(requestId, controller)
       const client = new DeepSeekWebClient({ userToken: token })
+      let usedSessionId: string | undefined
       try {
         const stream = client.streamChat(messages as readonly Message[], {
           reasoning,
           search,
           chatSessionId,
           signal: controller.signal,
+          onSessionId: (id) => {
+            usedSessionId = id
+          },
         })
         for await (const ev of stream) {
           if (ev.kind === 'thinking' || ev.kind === 'text') {
             sendEvent(requestId, ev.kind, ev.text)
           }
         }
-        sendDone(requestId)
+        sendDone(requestId, usedSessionId)
       } catch (err) {
         if (controller.signal.aborted) {
-          sendDone(requestId) // 用户主动停止 → 正常结束
+          sendDone(requestId, usedSessionId) // 用户主动停止 → 正常结束
         } else {
           sendError(requestId, err instanceof Error ? err.message : String(err))
         }
@@ -104,10 +108,13 @@ export default defineContentScript({
       }
     }
 
-    function sendDone(requestId: string) {
+    function sendDone(requestId: string, sessionId?: string) {
       if (contextDead) return
       try {
-        void chrome.runtime.sendMessage({ topic: EXT_TOPIC_CHAT_STREAM_DONE, payload: { requestId } })
+        void chrome.runtime.sendMessage({
+          topic: EXT_TOPIC_CHAT_STREAM_DONE,
+          payload: { requestId, sessionId },
+        })
       } catch {
         /* ignore */
       }

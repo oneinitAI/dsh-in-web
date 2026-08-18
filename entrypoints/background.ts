@@ -24,6 +24,7 @@ import { buildAgentTools } from '@/utils/agent/tools'
 import { Workspace } from '@/utils/fs/workspace'
 import type { Skill } from '@/utils/skills/skill'
 import type { LlmStreamEvent } from '@/utils/plugin/host'
+import { getSettings } from '@/utils/settings/settings'
 
 interface PageState {
   authPresent: boolean
@@ -197,12 +198,16 @@ export default defineBackground(() => {
     const listener = (msg: unknown) => {
       if (typeof msg !== 'object' || msg === null) return
       const m = msg as { topic?: unknown; payload?: unknown }
-      const p = m.payload as { requestId?: string } | undefined
+      const p = m.payload as { requestId?: string; sessionId?: string } | undefined
       if (p?.requestId !== requestId) return
       if (m.topic === EXT_TOPIC_CHAT_STREAM_EVENT) {
         const ev = (m.payload as ChatStreamEventPayload).event
         queue.push({ kind: 'event', event: ev })
       } else if (m.topic === EXT_TOPIC_CHAT_STREAM_DONE) {
+        // persistSession 开启时把本次实际使用的会话存下，供下一轮复用
+        if (currentPersistSession && typeof p?.sessionId === 'string' && p.sessionId) {
+          currentSessionId = p.sessionId
+        }
         queue.push({ kind: 'done' })
       } else if (m.topic === EXT_TOPIC_CHAT_STREAM_ERROR) {
         queue.push({ kind: 'error', error: (m.payload as { error: string }).error })
@@ -232,11 +237,15 @@ export default defineBackground(() => {
 
   let currentReasoning = false
   let currentSearch = false
+  /** persistSession 设置快照（每次 runStream 时读取）——开启则多轮复用 chat_session */
+  let currentPersistSession = false
 
   /** 流式聊天编排 —— agent loop 驱动（多轮工具调用回填） */
   async function runStream(messages: Message[], reasoning: boolean, search: boolean) {
     currentReasoning = reasoning
     currentSearch = search
+    currentPersistSession = (await getSettings()).persistSession
+    if (!currentPersistSession) currentSessionId = undefined
     const ws = new Workspace({ sandboxMode: 'workspace-write', dbName: 'dsh-in-web-workspace' })
     try {
       await ws.init()

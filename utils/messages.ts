@@ -117,6 +117,8 @@ export interface ChatStreamEventPayload {
 export const EXT_TOPIC_CHAT_STREAM_DONE = 'chat-stream-done'
 export interface ChatStreamDonePayload {
   requestId: string
+  /** 本次实际使用的 chat_session_id（新建或复用）——供 SW 在 persistSession 下持久化 */
+  sessionId?: string
 }
 
 /** content script → SW：流失败 */

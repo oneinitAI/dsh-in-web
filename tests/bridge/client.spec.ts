@@ -136,6 +136,21 @@ describe('DeepSeekWebClient.streamChat', () => {
     expect(body2.search_enabled).toBe(false)
   })
 
+  it('onSessionId 回调返回实际使用的 chat_session_id（复用或新建）', async () => {
+    const handler = async (_url: string, _init?: RequestInit): Promise<Response> =>
+      sseResponse('data: {"v":"FINISHED","p":"response/status"}\n')
+    // 传 chatSessionId → 复用已有会话，不再调用 create_session
+    const fetcher = vi.fn(chatAwareFetcher(handler))
+    const sessionIds: (string | undefined)[] = []
+    await collect(new DeepSeekWebClient({ userToken: 'tok' }).streamChat(
+      [{ role: 'user', content: 'hi' }],
+      { chatSessionId: 'sid-reuse', fetcher: fetcher as typeof fetch, onSessionId: (id) => sessionIds.push(id) },
+    ))
+    expect(sessionIds).toEqual(['sid-reuse'])
+    // 复用时不请求 create_session：calls = current(0) + pow(1) + completion(2)
+    expect(fetcher.mock.calls.map(([u]) => String(u))).not.toContain(expect.stringContaining('/chat_session/create'))
+  })
+
   it('completion 请求总带有效的 x-ds-pow-response（主动 PoW）', async () => {
     const completionPow: string[] = []
     const fetcher = vi.fn(chatAwareFetcher(async (url: string, init?: RequestInit) => {
