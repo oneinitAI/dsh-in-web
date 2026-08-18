@@ -65,6 +65,50 @@ describe('parseDeepSeekChunk', () => {
     expect(events).toEqual([{ kind: 'text', text: '答' }])
   })
 
+  it('回归：THINK 后紧跟 ANSWER 必须强制切回 text（否则全进 thinking）', () => {
+    // 真实流：thinking 片段后接 ANSWER 片段，即使当前状态是 thinking
+    const { events, nextType } = parseDeepSeekChunk(
+      {
+        v: {
+          response: {
+            thinking_enabled: true,
+            fragments: [{ type: 'THINK', content: '推理' }, { type: 'ANSWER', content: '回答' }],
+          },
+        },
+        p: '',
+      },
+      { thinkingEnabled: true, currentType: 'text' },
+    )
+    expect(events).toEqual([
+      { kind: 'thinking', text: '推理' },
+      { kind: 'text', text: '回答' },
+    ])
+    expect(nextType).toBe('text')
+  })
+
+  it('thinking_enabled=false 时无类型片段归 text（对齐 OmniRoute sendByPath）', () => {
+    const { events, nextType } = parseDeepSeekChunk(
+      { v: { response: { thinking_enabled: false, content: '普通回答' } }, p: '' },
+      { thinkingEnabled: true, currentType: 'thinking' },
+    )
+    expect(events).toEqual([{ kind: 'text', text: '普通回答' }])
+    expect(nextType).toBe('text')
+  })
+
+  it('fragment 类型 THINK 权威覆盖 thinking_enabled=false（对齐 OmniRoute）', () => {
+    const { events, nextType } = parseDeepSeekChunk(
+      { v: { response: { thinking_enabled: false, fragments: [{ type: 'THINK', content: 'x' }] } }, p: '' },
+      { thinkingEnabled: true, currentType: 'text' },
+    )
+    expect(events).toEqual([{ kind: 'thinking', text: 'x' }])
+    expect(nextType).toBe('thinking')
+  })
+
+  it('字符串 v 无匹配路径时按当前类型输出（对齐 OmniRoute 无条件发送）', () => {
+    const { events } = parseDeepSeekChunk({ v: '普通流', p: 'response' }, { currentType: 'text' })
+    expect(events).toEqual([{ kind: 'text', text: '普通流' }])
+  })
+
   it('非 FINISHED 的 status 不产出事件', () => {
     const { events } = parseDeepSeekChunk({ v: 'INCOMPLETE', p: 'response/status' }, {})
     expect(events).toEqual([])

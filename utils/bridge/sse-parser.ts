@@ -82,7 +82,8 @@ export function parseDeepSeekChunk(
     nextType = thinkingEnabled || nextType !== 'text' ? 'thinking' : 'text'
   }
 
-  // 字符串值
+  // 字符串值（对齐 OmniRoute：任意 string v 都按当前路径发送，
+  // 除 FINISHED 状态与已处理的 status 路径外）
   if (typeof v === 'string') {
     if (v === 'FINISHED') {
       events.push({ kind: 'finish' })
@@ -92,7 +93,7 @@ export function parseDeepSeekChunk(
       pushTextLike(events, v, 'text')
     } else if (path === 'response/thinking_content') {
       pushTextLike(events, v, thinkingEnabled ? 'thinking' : 'text')
-    } else if (path === '' || path.endsWith('/content')) {
+    } else {
       pushTextLike(events, v, nextType)
     }
     return { events, nextType }
@@ -115,19 +116,29 @@ export function parseDeepSeekChunk(
   // 对象值（fragments 包装等）
   if (v && typeof v === 'object') {
     const obj = v as Record<string, unknown>
+    const wrapped = (obj.response && typeof obj.response === 'object'
+      ? (obj.response as Record<string, unknown>)
+      : obj)
+    // thinking_enabled 驱动路径切换（对齐 OmniRoute）：
+    //   true → thinking；false → text
+    if (typeof wrapped.thinking_enabled === 'boolean') {
+      nextType = wrapped.thinking_enabled ? 'thinking' : 'text'
+    }
     const inlineText = typeof obj.text === 'string'
       ? obj.text
       : typeof obj.content === 'string'
         ? obj.content
-        : ''
+        : typeof wrapped.text === 'string'
+          ? wrapped.text
+          : typeof wrapped.content === 'string'
+            ? wrapped.content
+            : ''
     if (inlineText) {
       const ty: 'text' | 'thinking' =
-        path === 'response/thinking_content' && thinkingEnabled ? 'thinking' : nextType
+        (path === 'response/thinking_content' || nextType === 'thinking')
+          && thinkingEnabled ? 'thinking' : nextType
       pushTextLike(events, inlineText, ty)
     }
-    const wrapped = (obj.response && typeof obj.response === 'object'
-      ? (obj.response as Record<string, unknown>)
-      : obj)
     if (Array.isArray(wrapped.fragments)) {
       for (const frag of wrapped.fragments as unknown[]) {
         if (!frag || typeof frag !== 'object') continue
@@ -135,10 +146,12 @@ export function parseDeepSeekChunk(
         const typeName = String(f.type ?? '').toUpperCase()
         const content = String(f.content ?? '')
         if (!content) continue
+        // fragment 类型权威驱动路径（对齐 OmniRoute applyFragmentType）：
+        //   THINK → thinking；ANSWER / RESPONSE → text；未知沿用 nextType
         if (typeName === 'THINK' || typeName === 'THINKING') {
           nextType = 'thinking'
           events.push({ kind: 'thinking', text: content })
-        } else if (typeName === 'RESPONSE') {
+        } else if (typeName === 'ANSWER' || typeName === 'RESPONSE') {
           nextType = 'text'
           events.push({ kind: 'text', text: content })
         } else {
