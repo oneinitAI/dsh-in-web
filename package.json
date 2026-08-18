@@ -21,6 +21,7 @@
     "check": "pnpm compile && pnpm test && pnpm build"
   },
   "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
