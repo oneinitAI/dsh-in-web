@@ -132,3 +132,8 @@ ctx.llmâ†’ç½‘é¡µæ¡¥ / ctx.fsâ†’è™šæ‹ŸFS / ctx.skillsâ†’SKILL.mdæ³¨å†Œè¡¨ / ctx.s
   - Cordis å†…æ ¸ï¼ˆ@deepseek-ai/cordisï¼‰çº¯ JS DI/æ’ä»¶æ¡†æ¶ï¼Œå¯è·‘æµè§ˆå™¨ï¼ˆè¯æ®ï¼šclient/web/src/loader-status.ts import FiberStateï¼›storage ç»§æ‰¿ Serviceï¼‰
   - dsh Web å®¢æˆ·ç«¯ = æµè§ˆå™¨å†… Cordis åº”ç”¨ï¼špackages/client/webï¼ˆAppRoot/boot.tsx/app-shell.tsï¼‰+ client/runtime/src/clientï¼ˆç‹¬ç«‹ client ä¸Šä¸‹æ–‡ï¼šsessions/workspaces/conversation/slots/agentsï¼‰ï¼Œwindow.__ModuleLoader__.load() åŠ è½½å®¢æˆ·ç«¯æ’ä»¶ bundle
   - æ’ä»¶åˆ†ä¸‰ç±»ï¼šhost ä¾§ï¼ˆNode å¼ºä¾èµ– fs/sandbox/subprocess/llm/terminal/e2b â†’ æµè§ˆå™¨ç‰©ç†ä¸å¯è¡Œï¼‰ï¼›client ä¾§ï¼ˆslots/connection/remote â†’ æµè§ˆå™¨å¯è·‘ï¼‰ï¼›æ•°æ®ä¾§ï¼ˆSKILL.md/tool schema/prompt preset â†’ å¯è¿ç§»ï¼‰
+
+## ½ø¶È 2026-08-18
+- Wave 1-3 ÒÑÍê³É£¨82¡ú86 ²âÊÔÈ«ÂÌ£©£ºĞ­Òé²ã+ÇÅ½Ó runtime£»ĞéÄâFS/skill¿â/ÌáÊ¾´Ê/agentÑ­»·£»Cordis ÄÚºË+ËŞÖ÷Ãæ+L0¼ÓÔØÆ÷+L1Éè¼ÆÎÄµµ
+- Ìá½»£ºd518268(ÇÅ½Ó runtime) 6f90d31(ĞéÄâFS) 58a8712(skill) 74f8a94(prompt) 8c4c510(agent) 21dbbf8(cordis) 2c42070(ËŞÖ÷Ãæ) a6f2d35(loader) 7724e95(L1ÎÄµµ)
+- ?? Wave 1 SURFACE ÑéÖ¤´ı×ö£ºÕæÊµä¯ÀÀÆ÷¼ÓÔØ .output/chrome-mv3 ·¢ÏûÏ¢£¬È·ÈÏ SSE Á÷Ê½£¨SW fetch Origin ·çÏÕµã£©
