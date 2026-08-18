@@ -5,6 +5,7 @@ import { buildFileTree, filterTree, type TreeNode } from '@/utils/ui/filetree'
 import type { FsEntry } from '@/utils/fs/workspace'
 import { parseSkillMd, type Skill } from '@/utils/skills/skill'
 import { interpolate, parseSections, renderSections, type PromptSection } from '@/utils/prompts/prompt'
+import { TerminalView } from './TerminalView'
 
 interface PageState {
   authPresent: boolean
@@ -20,13 +21,14 @@ interface ChatTurn {
 
 const INITIAL: PageState = { authPresent: false, url: '', connected: false }
 
-type Tab = 'chat' | 'files' | 'skills' | 'prompts'
+type Tab = 'chat' | 'files' | 'skills' | 'prompts' | 'terminal'
 
 const TAB_LABELS: Record<Tab, string> = {
   chat: '会话',
   files: '文件',
   skills: '技能',
   prompts: '提示词',
+  terminal: '终端',
 }
 
 /** 给 SW 发 panel-query 的封装（返回 ok + payload） */
@@ -210,7 +212,7 @@ export function App() {
       </header>
 
       <nav className="tabs">
-        {(['chat', 'files', 'skills', 'prompts'] as const).map((t) => (
+        {(['chat', 'files', 'skills', 'prompts', 'terminal'] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? 'tab--active' : ''}`} onClick={() => setTab(t)}>
             {TAB_LABELS[t]}
           </button>
@@ -350,6 +352,8 @@ export function App() {
           <pre className="prompts__out">{promptResult}</pre>
         </div>
       )}
+
+      {tab === 'terminal' && <TerminalView />}
     </div>
   )
 }

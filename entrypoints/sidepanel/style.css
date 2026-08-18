@@ -490,3 +490,22 @@ body {
   max-height: 200px;
   overflow-y: auto;
 }
+
+/* ── Wave 4.3 终端 MVP ─────────────────────────────── */
+
+.terminal {
+  flex: 1;
+  min-height: 300px;
+  background: #16181d;
+  border-radius: 8px;
+  overflow: hidden;
+  padding: 4px;
+}
+
+.terminal .xterm {
+  height: 100%;
+}
+
+.terminal .xterm-viewport {
+  background: #16181d !important;
+}
