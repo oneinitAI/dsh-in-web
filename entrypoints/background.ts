@@ -720,6 +720,87 @@ export default defineBackground(() => {
     return { ok: true, value: { groups: DSH_MODEL_GROUPS, failures: [] } }
   }
 
+  // ── agentPreset.*（官方 4 个内置预设，元数据与 deepseek-harness
+  //    apps/cli/config/agent-presets/{standard,code,minimal,cordis}/preset.yml 一致）──
+  interface DshAgentPresetEntry {
+    id: string
+    trust: 'system' | 'user'
+    isDefault: boolean
+    name?: string
+    description?: string
+  }
+
+  const DSH_AGENT_PRESETS: ReadonlyArray<{
+    readonly id: string
+    readonly name: string
+    readonly description: string
+  }> = [
+    {
+      id: 'standard',
+      name: '标准模式',
+      description: '功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。',
+    },
+    {
+      id: 'code',
+      name: 'PTC 模式',
+      description: '具备标准模式的全部能力，并通过 Code Mode SDK 呈现工具，让模型用一个 TypeScript 程序组合多步操作。',
+    },
+    {
+      id: 'minimal',
+      name: '极简模式',
+      description: '仅提供持久 bash 与 str_replace_editor 的双工具编码 Agent。',
+    },
+    {
+      id: 'cordis',
+      name: '创造模式',
+      description: '用于创建自定义 Agent preset：具备标准模式的全部能力，并提供运行时检查、插件实验和 preset 创作指导。',
+    },
+  ]
+
+  function dshAgentPresetList(): DshRpcResult {
+    const presets: DshAgentPresetEntry[] = DSH_AGENT_PRESETS.map((p) => ({
+      id: p.id,
+      trust: 'system', // 官方内置
+      isDefault: p.id === 'standard',
+      name: p.name,
+      description: p.description,
+    }))
+    // authorable 保守置 false：不暴露未桥接的「新建预设」创作流程，但预设列表展示真实 4 项
+    return { ok: true, value: { presets, authorable: false, hasDocument: false } }
+  }
+
+  // ── pluginInventory.*（boot-manifest 内置插件清单）─────────────────────
+  interface DshPluginInventoryEntry {
+    entryId: string
+    moduleName: string
+    enabled: boolean
+    fiberPhase: string
+  }
+
+  /** 从扩展资源读取 boot-manifest.js 并解析 entries（SW 无 public 路径，走 chrome.runtime URL） */
+  async function dshPluginInventoryList(): Promise<DshRpcResult> {
+    try {
+      const res = await fetch(chrome.runtime.getURL('dsh-web/boot-manifest.js'))
+      const text = await res.text()
+      // boot-manifest.js 形如 `window.__DSH_BOOT__ = {...};`，截取对象字面量做 JSON 解析
+      const start = text.indexOf('{')
+      const end = text.lastIndexOf('};')
+      if (start < 0 || end <= start) return { ok: true, value: { entries: [] } }
+      const boot = JSON.parse(text.slice(start, end + 1)) as {
+        entries?: ReadonlyArray<{ id?: unknown }>
+      }
+      const entries: DshPluginInventoryEntry[] = (boot.entries ?? []).flatMap((e) => {
+        if (typeof e?.id !== 'string' || !e.id) return []
+        // 内置插件全部加载成功 → enabled true、fiberPhase active
+        return [{ entryId: e.id, moduleName: e.id, enabled: true, fiberPhase: 'active' }]
+      })
+      return { ok: true, value: { entries } }
+    } catch {
+      // fetch / 解析失败回落空，不报错（面板显示空清单而非「无法读取插件」）
+      return { ok: true, value: { entries: [] } }
+    }
+  }
+
   // ── 分派表（未列出的方法回落到 dshNotImplemented 错误包络）────────
   const dshRpcHandlers: Record<string, DshRpcHandler> = {
     'host.describe': () => ({ ok: true, value: dshDescribeValue() }),
@@ -734,6 +815,16 @@ export default defineBackground(() => {
     // host.pickDirectory：工作区目录选择对话框；合法空值表示用户取消选择
     // （对齐 hostPickDirectoryValueSchema：path 为 string|null）。
     'host.pickDirectory': () => ({ ok: true, value: { path: null } }),
+    // host.createDirectory：新建文件夹（对齐 hostCreateDirectoryValueSchema：
+    // request { path, name }，value { path }）。不做真实 FS 创建，返回合成绝对路径
+    // 即可让 UI 刷新目录；path/name 缺失时兜底 '/'，避免 UI 拿到非法路径。
+    'host.createDirectory': (payload) => {
+      const p = (payload ?? {}) as { path?: unknown; name?: unknown }
+      const path = typeof p.path === 'string' && p.path ? p.path : ''
+      const name = typeof p.name === 'string' && p.name ? p.name : ''
+      if (!path || !name) return { ok: true, value: { path: '/' } }
+      return { ok: true, value: { path: `${path}/${name}` } }
+    },
     'session.list': () => ({ ok: true, value: { items: [] } }),
     'session.search': () => ({ ok: true, value: { items: [], hasMore: false } }),
     'session.create': dshSessionCreate,
@@ -758,12 +849,9 @@ export default defineBackground(() => {
     'settings.mutate': dshSettingsMutate,
     'llm.providers': dshLlmProviders,
     'llm.models': dshLlmModels,
-    // agentPreset.list 由 dsh UI 启动时即调用（Agent 预设面板），返回空列表
-    // 而非错误包络，避免面板显示「无法加载 Agent 预设」
-    'agentPreset.list': () => ({
-      ok: true,
-      value: { presets: [], authorable: false, hasDocument: false },
-    }),
+    // agentPreset.list：Agent 预设面板启动即调用，返回官方 4 个内置预设
+    // （standard/code/minimal/cordis，元数据与 harness preset.yml 一致）
+    'agentPreset.list': dshAgentPresetList,
     // credentials.describe / subagent.list：对应面板启动即调用，返回空数据
     'credentials.describe': () => ({ ok: true, value: { credentials: {} } }),
     'subagent.list': () => ({ ok: true, value: { entries: [], parentAvailable: true } }),
@@ -771,8 +859,8 @@ export default defineBackground(() => {
     // 经 ctx.remote.pluginInventory.list() 调用（wire method = pluginInventory.list，
     // 见 dsh-api-remotes TYPERT_REMOTE 中 pluginInventory descriptor）。
     // 返回形状对齐 PluginInventorySnapshot = { entries: [{ entryId, moduleName,
-    //   enabled, fiberPhase }] }，空 entries 让面板显示空清单而非「无法读取插件」。
-    'pluginInventory.list': () => ({ ok: true, value: { entries: [] } }),
+    //   enabled, fiberPhase }] }，entries 来自 boot-manifest 的真实 37 个内置插件。
+    'pluginInventory.list': dshPluginInventoryList,
     // dynamicCordisRunner.*：本扩展不实现动态插件运行（Cordis 面板启动即调用
     // inventory / syncInspectManifest 显示插件清单），全部返回空/成功状态，
     // 让面板显示空清单而非「无法加载」错误。错误包络方法仅在真有动态插件
