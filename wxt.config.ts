@@ -15,6 +15,13 @@ export default defineConfig({
       'unlimitedStorage',
     ],
     host_permissions: ['https://chat.deepseek.com/*'],
+    web_accessible_resources: [
+      {
+        // 允许页面 iframe 加载 dsh 面板（dsh-ui.content.ts 注入）
+        resources: ['sidepanel.html', 'chunks/*', 'assets/*'],
+        matches: ['https://chat.deepseek.com/*'],
+      },
+    ],
     action: {
       default_title: 'dsh-in-web',
     },

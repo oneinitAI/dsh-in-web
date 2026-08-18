@@ -138,9 +138,9 @@ export default defineBackground(() => {
 
     // ── side panel 命令 ──────────────────────────────
     if (topic === 'send-message') {
-      const { messages, reasoning } =
-        (message as { payload?: { messages: Message[]; reasoning?: boolean } }).payload ?? {}
-      void runStream(messages ?? [], reasoning ?? false)
+      const { messages, reasoning, search } =
+        (message as { payload?: { messages: Message[]; reasoning?: boolean; search?: boolean } }).payload ?? {}
+      void runStream(messages ?? [], reasoning ?? false, search ?? false)
       sendResponse({ ok: true })
       return
     }
@@ -214,6 +214,7 @@ export default defineBackground(() => {
         requestId,
         messages: hist,
         reasoning: currentReasoning,
+        search: currentSearch,
         chatSessionId: currentSessionId,
       }
       await sendToPage({ topic: EXT_TOPIC_CHAT_STREAM_START, payload })
@@ -230,10 +231,12 @@ export default defineBackground(() => {
   }
 
   let currentReasoning = false
+  let currentSearch = false
 
   /** 流式聊天编排 —— agent loop 驱动（多轮工具调用回填） */
-  async function runStream(messages: Message[], reasoning: boolean) {
+  async function runStream(messages: Message[], reasoning: boolean, search: boolean) {
     currentReasoning = reasoning
+    currentSearch = search
     const ws = new Workspace({ sandboxMode: 'workspace-write', dbName: 'dsh-in-web-workspace' })
     try {
       await ws.init()

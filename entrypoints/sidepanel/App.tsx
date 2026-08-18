@@ -5,6 +5,7 @@ import { buildFileTree, filterTree, type TreeNode } from '@/utils/ui/filetree'
 import type { FsEntry } from '@/utils/fs/workspace'
 import { parseSkillMd, type Skill } from '@/utils/skills/skill'
 import { interpolate, parseSections, renderSections, type PromptSection } from '@/utils/prompts/prompt'
+import { getSettings, patchSettings, type DshSettings } from '@/utils/settings/settings'
 import { TerminalView } from './TerminalView'
 
 interface PageState {
@@ -21,7 +22,7 @@ interface ChatTurn {
 
 const INITIAL: PageState = { authPresent: false, url: '', connected: false }
 
-type Tab = 'chat' | 'files' | 'skills' | 'prompts' | 'terminal'
+type Tab = 'chat' | 'files' | 'skills' | 'prompts' | 'terminal' | 'settings'
 
 const TAB_LABELS: Record<Tab, string> = {
   chat: '会话',
@@ -29,7 +30,11 @@ const TAB_LABELS: Record<Tab, string> = {
   skills: '技能',
   prompts: '提示词',
   terminal: '终端',
+  settings: '设置',
 }
+
+/** 是否以 iframe 嵌入模式运行（dsh-ui.content.ts 注入的 URL 带 ?embed=1） */
+const IS_EMBEDDED = typeof location !== 'undefined' && location.search.includes('embed=1')
 
 /** 给 SW 发 panel-query 的封装（返回 ok + payload） */
 function query<T>(cmd: 'list-files' | 'read-file' | 'list-skills', path?: string): Promise<T> {
@@ -71,6 +76,18 @@ export function App() {
   )
   const [promptVars, setPromptVars] = useState('skills=读写文件与执行命令\nworkspace=/ 虚拟工作区')
   const [promptResult, setPromptResult] = useState('')
+
+  // ── 设置（持久化）────────────────────────
+  const [settings, setSettings] = useState<DshSettings | null>(null)
+
+  useEffect(() => {
+    void getSettings().then(setSettings)
+  }, [])
+
+  async function toggleSetting<K extends keyof DshSettings>(key: K, value: DshSettings[K]) {
+    const next = await patchSettings({ [key]: value })
+    setSettings(next)
+  }
 
   useEffect(() => {
     const port = chrome.runtime.connect({ name: 'dsh-panel-port' })
@@ -170,7 +187,14 @@ export function App() {
     const all: Message[] = [...history, { role: 'user', content: text }]
     setTurns((prev) => [...prev, { role: 'user', content: text, thinking: '' }])
     setInput('')
-    chrome.runtime.sendMessage({ topic: 'send-message', payload: { messages: all, reasoning: true } }).catch(() => {})
+    void chrome.runtime.sendMessage({
+      topic: 'send-message',
+      payload: {
+        messages: all,
+        reasoning: settings?.reasoning ?? true,
+        search: settings?.search ?? false,
+      },
+    })
   }
 
   function stop() {
@@ -209,10 +233,15 @@ export function App() {
         <span className={`badge ${state.connected ? 'badge--ok' : 'badge--warn'}`}>
           {state.connected ? '已桥接' : '等待页面'}
         </span>
+        {IS_EMBEDDED && (
+          <button className="btn btn--danger btn--small" onClick={() => void toggleSetting('dshMode', 'off')}>
+            退出 dsh 模式
+          </button>
+        )}
       </header>
 
       <nav className="tabs">
-        {(['chat', 'files', 'skills', 'prompts', 'terminal'] as const).map((t) => (
+        {(['chat', 'files', 'skills', 'prompts', 'terminal', 'settings'] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? 'tab--active' : ''}`} onClick={() => setTab(t)}>
             {TAB_LABELS[t]}
           </button>
@@ -354,6 +383,106 @@ export function App() {
       )}
 
       {tab === 'terminal' && <TerminalView />}
+
+      {tab === 'settings' && (
+        <div className="settings">
+          {settings == null ? (
+            <div className="chat__empty">加载设置中…</div>
+          ) : (
+            <>
+              <div className="settings__group">
+                <h3 className="settings__group-title">页面注入</h3>
+                <label className="setting-row">
+                  <span className="setting-row__label">
+                    dsh 模式
+                    <span className="setting-row__hint">on = 页面内嵌 dsh 全功能界面；off = 普通 DeepSeek 对话</span>
+                  </span>
+                  <span className="switch">
+                    <input
+                      type="checkbox"
+                      checked={settings.dshMode === 'on'}
+                      onChange={(e) => void toggleSetting('dshMode', e.target.checked ? 'on' : 'off')}
+                    />
+                    <span className="switch__track" />
+                  </span>
+                </label>
+              </div>
+
+              <div className="settings__group">
+                <h3 className="settings__group-title">聊天</h3>
+                <label className="setting-row">
+                  <span className="setting-row__label">
+                    思考模式
+                    <span className="setting-row__hint">reasoning：展示模型思考过程</span>
+                  </span>
+                  <span className="switch">
+                    <input
+                      type="checkbox"
+                      checked={settings.reasoning}
+                      onChange={(e) => void toggleSetting('reasoning', e.target.checked)}
+                    />
+                    <span className="switch__track" />
+                  </span>
+                </label>
+                <label className="setting-row">
+                  <span className="setting-row__label">
+                    联网搜索
+                    <span className="setting-row__hint">search：搜索后回答</span>
+                  </span>
+                  <span className="switch">
+                    <input
+                      type="checkbox"
+                      checked={settings.search}
+                      onChange={(e) => void toggleSetting('search', e.target.checked)}
+                    />
+                    <span className="switch__track" />
+                  </span>
+                </label>
+                <label className="setting-row">
+                  <span className="setting-row__label">
+                    会话复用
+                    <span className="setting-row__hint">多轮连续对话共享 chat_session</span>
+                  </span>
+                  <span className="switch">
+                    <input
+                      type="checkbox"
+                      checked={settings.persistSession}
+                      onChange={(e) => void toggleSetting('persistSession', e.target.checked)}
+                    />
+                    <span className="switch__track" />
+                  </span>
+                </label>
+              </div>
+
+              <div className="settings__group">
+                <h3 className="settings__group-title">界面</h3>
+                <label className="setting-row">
+                  <span className="setting-row__label">暗色主题</span>
+                  <span className="switch">
+                    <input
+                      type="checkbox"
+                      checked={settings.darkTheme}
+                      onChange={(e) => void toggleSetting('darkTheme', e.target.checked)}
+                    />
+                    <span className="switch__track" />
+                  </span>
+                </label>
+                <label className="setting-row">
+                  <span className="setting-row__label">字号：{settings.fontSize}px</span>
+                  <input
+                    type="range"
+                    min={10}
+                    max={20}
+                    value={settings.fontSize}
+                    onChange={(e) => void toggleSetting('fontSize', Number(e.target.value))}
+                    className="setting-row__range"
+                  />
+                </label>
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }

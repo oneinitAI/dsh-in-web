@@ -61,7 +61,7 @@ export default defineContentScript({
     const activeStreams = new Map<string, AbortController>()
 
     async function runChatStream(payload: ChatStreamStartPayload) {
-      const { requestId, messages, reasoning, chatSessionId } = payload
+      const { requestId, messages, reasoning, search, chatSessionId } = payload
       const token = readUserToken()
       if (!token) {
         sendError(requestId, '未检测到登录态，请先登录 chat.deepseek.com')
@@ -73,6 +73,7 @@ export default defineContentScript({
       try {
         const stream = client.streamChat(messages as readonly Message[], {
           reasoning,
+          search,
           chatSessionId,
           signal: controller.signal,
         })

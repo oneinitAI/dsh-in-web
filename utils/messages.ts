@@ -100,6 +100,8 @@ export interface ChatStreamStartPayload {
   requestId: string
   messages: { role: 'system' | 'user' | 'assistant' | 'tool'; content: string }[]
   reasoning?: boolean
+  /** 联网搜索 */
+  search?: boolean
   /** 复用已有会话；缺省由 content script 自动创建 */
   chatSessionId?: string
 }
