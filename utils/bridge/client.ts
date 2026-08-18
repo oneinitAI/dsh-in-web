@@ -216,7 +216,7 @@ export class DeepSeekWebClient {
       if (lower.includes('pow_required') || lower.includes('pow challenge') || lower.includes('"biz_code":40010')) {
         return true
       }
-      throw new DSWebProtocolError(`completion: unexpected JSON body (HTTP ${resp.status})`)
+      throw new DSWebProtocolError(`completion: unexpected JSON body (HTTP ${resp.status}) — ${summarizeJsonSafe(text)}`)
     }
     if (!resp.ok) throw new DSWebProtocolError(`completion: HTTP ${resp.status}`)
     return false
@@ -339,8 +339,14 @@ function summarizeJson(raw: unknown): string {
   } catch {
     text = String(raw)
   }
-  if (text.length <= 120) return text
-  return `${text.slice(0, 120)}…`
+  return summarizeJsonSafe(text)
+}
+
+/** 截断任意字符串为单行诊断摘要 */
+function summarizeJsonSafe(text: string): string {
+  const single = text.replace(/\s+/g, ' ').trim()
+  if (single.length <= 200) return single
+  return `${single.slice(0, 200)}…`
 }
 
 function extractPowChallenge(raw: unknown): PowChallenge | null {
