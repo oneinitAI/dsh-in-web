@@ -77,6 +77,35 @@ window.__dshDebug = {
     }
     s1.onerror = () => out('bad', 'boot-manifest.js LOAD FAILED (404?)')
     document.head.appendChild(s1)
+
+    // ── 5. RPC 探测：逐个调用 dsh RPC，看返回形状（模型/预设/插件面板数据源）──
+    out('---', '')
+    out('info', '[5] RPC 探测（直接发 chrome.runtime dsh-rpc，模拟 dsh UI 调用）…')
+    const rpcMethods = [
+      'host.describe',
+      'session.list', 'session.models', 'session.create',
+      'workspace.list', 'skill.list',
+      'settings.describe', 'llm.providers', 'llm.models',
+      'agentPreset.list', 'credentials.describe', 'subagent.list',
+      'dynamicCordisRunner/inventory', 'dynamicCordisRunner/syncInspectManifest',
+    ]
+    for (const method of rpcMethods) {
+      const body = method === 'session.create'
+        ? { type: 'client-request', rpcId: 'diag-1', method, payload: { title: 'diag' } }
+        : { type: 'client-request', rpcId: 'diag-1', method, payload: {} }
+      try {
+        const reply = await chrome.runtime.sendMessage({ kind: 'dsh-rpc', method, body })
+        const r = reply?.body?.result
+        if (r?.ok === true) {
+          out('ok', method + ' → ok: ' + JSON.stringify(r.value).slice(0, 180))
+        } else {
+          out('bad', method + ' → ERROR: ' + JSON.stringify(r?.error).slice(0, 160))
+        }
+      } catch (e) {
+        out('bad', method + ' → THREW: ' + e.message)
+      }
+    }
+    out('info', '[5] RPC 探测完成')
   },
 }
 window.__dshDebug.run()

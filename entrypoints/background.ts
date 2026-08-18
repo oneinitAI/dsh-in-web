@@ -587,6 +587,8 @@ export default defineBackground(() => {
     ns: string
     schema: unknown
     value: unknown
+    base?: unknown
+    user?: unknown
     applies: 'live' | 'restart'
     secrets: { path: string[]; set: boolean }[]
     revision: number
@@ -597,6 +599,11 @@ export default defineBackground(() => {
     return {
       ns: DSH_SETTINGS_NS,
       schema: {},
+      // base/user 为 settingsNamespaceViewSchema 的可选层（目录层/用户覆盖层）。
+      // models 面板会读 namespace.user / namespace.base（getPath/hasPath），
+      // 提供空对象避免 undefined 穿透（本扩展无分层持久化，全部归一化到 value）。
+      base: {},
+      user: {},
       value: { ...settings },
       applies: 'live',
       secrets: [],
@@ -696,7 +703,12 @@ export default defineBackground(() => {
             provider: 'deepseek',
             displayName: 'DeepSeek (网页版)',
             settingsNs: DSH_SETTINGS_NS,
-            settingsPath: ['provider'],
+            // settingsPath 必须为空数组：dsh-client-ui-settings-models 用
+            // nodeAtPath(rehydrateSchema(namespace.schema), settingsPath) 解析节点，
+            // 我们的 namespace.schema 是空对象（type 为空），任何非空 path 都会解析
+            // 失败并渲染 "unresolvable settings path"。空数组让 nodeAtPath 返回 root
+            // 节点本身（configured 判定走 settingsPath.length === 0 分支，恒成立）。
+            settingsPath: [],
             active: true,
           },
         ],
@@ -711,6 +723,17 @@ export default defineBackground(() => {
   // ── 分派表（未列出的方法回落到 dshNotImplemented 错误包络）────────
   const dshRpcHandlers: Record<string, DshRpcHandler> = {
     'host.describe': () => ({ ok: true, value: dshDescribeValue() }),
+    // host.listDirectory：目录选择器/浏览面板启动即调用，返回合法空目录
+    // （对齐 hostListDirectoryValueSchema：path/home/crumbs/entries/truncated）。
+    // 本扩展无真实宿主文件系统，entries 恒为空，避免面板显示「无法读取目录」。
+    'host.listDirectory': (payload) => {
+      const p = (payload ?? {}) as { path?: unknown }
+      const path = typeof p.path === 'string' && p.path ? p.path : '/'
+      return { ok: true, value: { path, home: '/', crumbs: [], entries: [], truncated: false } }
+    },
+    // host.pickDirectory：工作区目录选择对话框；合法空值表示用户取消选择
+    // （对齐 hostPickDirectoryValueSchema：path 为 string|null）。
+    'host.pickDirectory': () => ({ ok: true, value: { path: null } }),
     'session.list': () => ({ ok: true, value: { items: [] } }),
     'session.search': () => ({ ok: true, value: { items: [], hasMore: false } }),
     'session.create': dshSessionCreate,
@@ -744,6 +767,12 @@ export default defineBackground(() => {
     // credentials.describe / subagent.list：对应面板启动即调用，返回空数据
     'credentials.describe': () => ({ ok: true, value: { credentials: {} } }),
     'subagent.list': () => ({ ok: true, value: { entries: [], parentAvailable: true } }),
+    // pluginInventory.list：dsh-client-ui-settings-plugin-inventory 的「插件」设置页
+    // 经 ctx.remote.pluginInventory.list() 调用（wire method = pluginInventory.list，
+    // 见 dsh-api-remotes TYPERT_REMOTE 中 pluginInventory descriptor）。
+    // 返回形状对齐 PluginInventorySnapshot = { entries: [{ entryId, moduleName,
+    //   enabled, fiberPhase }] }，空 entries 让面板显示空清单而非「无法读取插件」。
+    'pluginInventory.list': () => ({ ok: true, value: { entries: [] } }),
     // dynamicCordisRunner.*：本扩展不实现动态插件运行（Cordis 面板启动即调用
     // inventory / syncInspectManifest 显示插件清单），全部返回空/成功状态，
     // 让面板显示空清单而非「无法加载」错误。错误包络方法仅在真有动态插件
