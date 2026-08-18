@@ -442,6 +442,19 @@ export default defineBackground(() => {
     return `sess-${Date.now()}-${virtualSessionSeq}`
   }
 
+  /**
+   * 虚拟会话注册表：session.create / session.fork 写入，session.list 读回。
+   * 让 UI 的 currentSession() 能取到 blank session 及 agentPreset ——
+   * dsh-client-ui-agent-preset 的 select 逻辑依赖
+   * `session.blank && session.agentPreset !== staged` 才 apply。
+   */
+  interface VirtualSessionRecord {
+    agentPreset?: string
+    blank: true
+    createdAt: number
+  }
+  const virtualSessions = new Map<string, VirtualSessionRecord>()
+
   async function getWorkspaceTitle(): Promise<string> {
     try {
       const stored = await chrome.storage.local.get(DSH_WORKSPACE_TITLE_KEY)
@@ -490,9 +503,34 @@ export default defineBackground(() => {
 
   // ── session.* ────────────────────────────────────────────────
   function dshSessionCreate(payload: unknown): DshRpcResult {
-    const p = (payload ?? {}) as { sessionId?: unknown }
+    const p = (payload ?? {}) as { sessionId?: unknown; agentPreset?: unknown }
     const sessionId = typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : mintVirtualSessionId()
-    return { ok: true, value: { sessionId } }
+    // sessionCreateRequestSchema 的 agentPreset 可选：透传回 value（undefined 时省略，schema optional）
+    const agentPreset = typeof p.agentPreset === 'string' && p.agentPreset ? p.agentPreset : undefined
+    virtualSessions.set(sessionId, {
+      ...(agentPreset !== undefined ? { agentPreset } : {}),
+      blank: true,
+      createdAt: Date.now(),
+    })
+    return {
+      ok: true,
+      value: {
+        sessionId,
+        ...(agentPreset !== undefined ? { agentPreset } : {}),
+      },
+    }
+  }
+
+  /** session.list：读回虚拟会话注册表，映射 sessionSummarySchema 形状 */
+  function dshSessionList(): DshRpcResult {
+    const items = [...virtualSessions.entries()].map(([sessionId, rec]) => ({
+      sessionId,
+      updatedAt: rec.createdAt,
+      running: false,
+      blank: true as const,
+      ...(rec.agentPreset !== undefined ? { agentPreset: rec.agentPreset } : {}),
+    }))
+    return { ok: true, value: { items } }
   }
 
   function dshSessionPrompt(payload: unknown): DshRpcResult {
@@ -536,8 +574,10 @@ export default defineBackground(() => {
   }
 
   function dshSessionFork(): DshRpcResult {
-    // 虚拟子会话（无持久化，fork 即派发一个新的会话 id）
-    return { ok: true, value: { sessionId: mintVirtualSessionId() } }
+    // 虚拟子会话（无持久化，fork 即派发一个新的会话 id；同时写入注册表供 session.list 读回）
+    const sessionId = mintVirtualSessionId()
+    virtualSessions.set(sessionId, { blank: true, createdAt: Date.now() })
+    return { ok: true, value: { sessionId } }
   }
 
   function dshSessionModels(): DshRpcResult {
@@ -1193,13 +1233,47 @@ export default defineBackground(() => {
   // ── 分派表（未列出的方法回落到 dshNotImplemented 错误包络）────────
   const dshRpcHandlers: Record<string, DshRpcHandler> = {
     'host.describe': () => ({ ok: true, value: dshDescribeValue() }),
-    // host.listDirectory：目录选择器/浏览面板启动即调用，返回合法空目录
+    // host.listDirectory：目录浏览面板读取本地 Workspace（IndexedDB）真实文件树
     // （对齐 hostListDirectoryValueSchema：path/home/crumbs/entries/truncated）。
-    // 本扩展无真实宿主文件系统，entries 恒为空，避免面板显示「无法读取目录」。
-    'host.listDirectory': (payload) => {
+    // entries 为 directoryEntrySchema = {name, path, hidden} 数组：目录项与文件项
+    // 都返回，name 取路径最后一段，path 用完整路径；crumbs 按路径分段逐段累积。
+    'host.listDirectory': async (payload) => {
       const p = (payload ?? {}) as { path?: unknown }
       const path = typeof p.path === 'string' && p.path ? p.path : '/'
-      return { ok: true, value: { path, home: '/', crumbs: [], entries: [], truncated: false } }
+      try {
+        const ws = await getQueryWs()
+        const entries = await ws.list(path)
+        let acc = ''
+        const crumbs: { name: string; path: string; hidden: false }[] = path
+          .split('/')
+          .filter(Boolean)
+          .map((seg) => {
+            acc += '/' + seg
+            return { name: seg, path: acc, hidden: false }
+          })
+        return {
+          ok: true,
+          value: {
+            path,
+            home: '/',
+            crumbs,
+            entries: entries.map((e) => {
+              const name = e.path.split('/').filter(Boolean).pop() ?? e.path
+              return { name, path: e.path, hidden: false }
+            }),
+            truncated: false,
+          },
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          error: {
+            code: 'internal',
+            message: `host.listDirectory: ${err instanceof Error ? err.message : String(err)}`,
+            details: {},
+          },
+        }
+      }
     },
     // host.pickDirectory：工作区目录选择对话框；合法空值表示用户取消选择
     // （对齐 hostPickDirectoryValueSchema：path 为 string|null）。
@@ -1214,7 +1288,7 @@ export default defineBackground(() => {
       if (!path || !name) return { ok: true, value: { path: '/' } }
       return { ok: true, value: { path: `${path}/${name}` } }
     },
-    'session.list': () => ({ ok: true, value: { items: [] } }),
+    'session.list': dshSessionList,
     'session.search': () => ({ ok: true, value: { items: [], hasMore: false } }),
     'session.create': dshSessionCreate,
     'session.history': () => ({ ok: true, value: { events: [], hasMore: false } }),
@@ -1263,27 +1337,27 @@ export default defineBackground(() => {
     // inventory / syncInspectManifest 显示插件清单），全部返回空/成功状态，
     // 让面板显示空清单而非「无法加载」错误。错误包络方法仅在真有动态插件
     // 运行时才可能被调用，届时 UI 显示错误但面板不崩。
-    'dynamicCordisRunner/inventory': () => ({ ok: true, value: [] }),
-    'dynamicCordisRunner/syncInspectManifest': () => ({ ok: true, value: null }),
-    'dynamicCordisRunner/getClientCode': () => dshDynamicNotBridged('dynamicCordisRunner/getClientCode'),
-    'dynamicCordisRunner/invoke': () => dshDynamicNotBridged('dynamicCordisRunner/invoke'),
-    'dynamicCordisRunner/runHostHalf': () => ({
+    'dynamicCordisRunner.inventory': () => ({ ok: true, value: [] }),
+    'dynamicCordisRunner.syncInspectManifest': () => ({ ok: true, value: null }),
+    'dynamicCordisRunner.getClientCode': () => dshDynamicNotBridged('dynamicCordisRunner.getClientCode'),
+    'dynamicCordisRunner.invoke': () => dshDynamicNotBridged('dynamicCordisRunner.invoke'),
+    'dynamicCordisRunner.runHostHalf': () => ({
       ok: true,
       value: { ok: false, message: 'dynamic plugin host half not available in dsh-in-web' },
     }),
-    'dynamicCordisRunner/resolveRequestRun': () => ({ ok: true, value: { accepted: false } }),
-    'dynamicCordisRunner/resolveInspectQuery': () => ({ ok: true, value: { accepted: false } }),
-    'dynamicCordisRunner/settleUserRun': () => ({
+    'dynamicCordisRunner.resolveRequestRun': () => ({ ok: true, value: { accepted: false } }),
+    'dynamicCordisRunner.resolveInspectQuery': () => ({ ok: true, value: { accepted: false } }),
+    'dynamicCordisRunner.settleUserRun': () => ({
       ok: true,
       value: { ok: false, reason: 'plugin-missing', message: 'no dynamic plugin running in dsh-in-web' },
     }),
-    'dynamicCordisRunner/stopFromPanel': () => ({ ok: true, value: { ok: true } }),
-    'dynamicCordisRunner/undefineFromPanel': () => ({
+    'dynamicCordisRunner.stopFromPanel': () => ({ ok: true, value: { ok: true } }),
+    'dynamicCordisRunner.undefineFromPanel': () => ({
       ok: true,
       value: { ok: false, reason: 'plugin-missing', message: 'no dynamic plugin defined in dsh-in-web' },
     }),
-    'dynamicCordisRunner/reportClientGuardFailure': () => ({ ok: true, value: null }),
-    'dynamicCordisRunner/reportRenderFailure': () => ({ ok: true, value: null }),
+    'dynamicCordisRunner.reportClientGuardFailure': () => ({ ok: true, value: null }),
+    'dynamicCordisRunner.reportRenderFailure': () => ({ ok: true, value: null }),
     // goal.*：chrome.storage.local 真实持久化（create → edit/pause/resume/complete/clear 全链路可操作）
     'goal.create': dshGoalCreate,
     'goal.edit': dshGoalEdit,
@@ -1331,17 +1405,21 @@ export default defineBackground(() => {
       }
     }
     const req = message.body
-    const handler = dshRpcHandlers[req.method]
+    // remote 命名空间调用（ctx.remote.xxx）经 connection.rpc.call("/api", endpoint)
+    // 发送的 method 是 "namespace/method"（斜杠，如 pluginInventory/list）；
+    // 直接 api 调用（api.xxx）是 "namespace.method"（点号）。归一化为点号查表。
+    const normalizedMethod = req.method.replaceAll('/', '.')
+    const handler = dshRpcHandlers[normalizedMethod]
     let result: DshRpcResult
     try {
-      result = handler ? await handler(req.payload) : dshNotImplemented(req.method)
+      result = handler ? await handler(req.payload) : dshNotImplemented(normalizedMethod)
     } catch (err) {
       // 任何实现抛错都收拢为合法错误包络，避免把异常泄漏给 iframe
       result = {
         ok: false,
         error: {
           code: 'internal',
-          message: `dsh RPC failed: ${req.method}: ${err instanceof Error ? err.message : String(err)}`,
+          message: `dsh RPC failed: ${normalizedMethod}: ${err instanceof Error ? err.message : String(err)}`,
           details: {},
         },
       }
