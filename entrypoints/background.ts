@@ -9,6 +9,11 @@
 import { DeepSeekWebClient } from '@/utils/bridge/client'
 import type { Message } from '@/utils/bridge/protocol'
 import { PANEL_PORT, type BridgeEventMessage } from '@/utils/messages'
+import { runAgentLoop } from '@/utils/agent/loop'
+import { buildAgentTools } from '@/utils/agent/tools'
+import { Workspace } from '@/utils/fs/workspace'
+import type { Skill } from '@/utils/skills/skill'
+import type { LlmStreamEvent } from '@/utils/plugin/host'
 
 interface PageState {
   authPresent: boolean
@@ -24,6 +29,10 @@ export default defineBackground(() => {
   // 会话内复用的 chat_session_id（多轮连续）
   let currentSessionId: string | undefined
   let activeStream: AbortController | null = null
+  // agent 循环的会话消息历史（含 tool 结果回填）
+  let sessionMessages: Message[] = []
+  // skill 库（运行时经插件加载器填充）
+  let skills: Skill[] = []
 
   const panelPorts = new Set<chrome.runtime.Port>()
 
@@ -97,31 +106,52 @@ export default defineBackground(() => {
     }
   })
 
-  /** 流式聊天编排 */
+  /** 流式聊天编排 —— agent loop 驱动（多轮工具调用回填） */
   async function runStream(messages: Message[], reasoning: boolean) {
     if (!pageState.token) {
       pushBridgeEvent({ kind: 'error', error: '未检测到登录态，请先登录 chat.deepseek.com' })
       return
     }
     activeStream = new AbortController()
+    const signal = activeStream.signal
     const client = new DeepSeekWebClient({ userToken: pageState.token })
+    const ws = new Workspace({ sandboxMode: 'workspace-write', dbName: 'dsh-in-web-workspace' })
     try {
-      const stream = client.streamChat(messages, {
+      await ws.init()
+    } catch (err) {
+      pushBridgeEvent({ kind: 'error', error: `工作区初始化失败: ${err instanceof Error ? err.message : String(err)}` })
+      return
+    }
+
+    /** LLM 桥：调 DeepSeekWebClient 并透传事件 */
+    async function* llmBridge(hist: Message[]): AsyncGenerator<LlmStreamEvent> {
+      const stream = client.streamChat(hist, {
         reasoning,
-        signal: activeStream.signal,
+        signal,
         chatSessionId: currentSessionId,
       })
       for await (const ev of stream) {
-        if (ev.kind === 'thinking') {
-          pushBridgeEvent({ kind: 'thinking', text: ev.text })
-        } else if (ev.kind === 'text') {
-          pushBridgeEvent({ kind: 'text', text: ev.text })
-        } else if (ev.kind === 'finish') {
-          pushBridgeEvent({ kind: 'finish' })
-        }
+        yield ev
       }
+    }
+
+    try {
+      const tools = buildAgentTools(ws, skills)
+      const result = await runAgentLoop({
+        llm: llmBridge,
+        tools,
+        messages,
+        maxTurns: 8,
+        onEvent: (ev) => {
+          if (ev.kind === 'thinking') pushBridgeEvent({ kind: 'thinking', text: ev.text })
+          else if (ev.kind === 'text') pushBridgeEvent({ kind: 'text', text: ev.text })
+        },
+      })
+      pushBridgeEvent({ kind: 'finish' })
+      // 更新会话内消息历史供下一轮连续对话（保留 tool 结果）
+      sessionMessages = result.messages
     } catch (err) {
-      if (activeStream?.signal.aborted) {
+      if (signal.aborted) {
         pushBridgeEvent({ kind: 'error', error: '已停止' })
       } else {
         pushBridgeEvent({ kind: 'error', error: err instanceof Error ? err.message : String(err) })
