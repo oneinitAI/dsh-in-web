@@ -120,11 +120,11 @@ export class DeepSeekWebClient {
   }
 
   /** POST /api/v0/chat_session/create → chat_session_id */
-  async createChatSession(opts: ClientOptions = {}): Promise<string> {
+  async createChatSession(opts: ClientOptions & { accessToken?: string } = {}): Promise<string> {
     const fetcher = opts.fetcher ?? this.fetcher
     const resp = await fetcher(`${API_HOST}${ENDPOINTS.chatSessionCreate}`, {
       method: 'POST',
-      headers: buildHeaders({ authorization: this.bearer() }),
+      headers: buildHeaders({ authorization: this.bearer(opts.accessToken) }),
       body: buildCreateSessionBody(),
       signal: opts.signal,
       credentials: 'include',
@@ -144,7 +144,11 @@ export class DeepSeekWebClient {
 
   /**
    * 流式聊天。把 messages 拼成单 prompt，POST /chat/completion，解析 SSE 按序产出事件。
-   * 遇 PoW required（412 或 JSON 含 pow）自动取挑战、求解、带 x-ds-pow-response 重试一次。
+   * 流程（对齐 OmniRoute 最新实现）：
+   *   1. 未传 accessToken 时先用 userToken 换（/users/current）
+   *   2. createChatSession 拿 chat_session_id
+   *   3. 主动取 PoW challenge 并求解，completion 请求带 x-ds-pow-response
+   *   4. 若仍遇 pow_required（412/40010）自动重试一次
    */
   async *streamChat(
     messages: readonly Message[],
@@ -152,21 +156,28 @@ export class DeepSeekWebClient {
   ): AsyncGenerator<BridgeEvent> {
     const fetcher = opts.fetcher ?? this.fetcher
     const flatPrompt = flattenMessagesToPrompt(messages)
-    const chatSessionId = opts.chatSessionId ?? (await this.createChatSession({ fetcher, signal: opts.signal }))
+    // 优先用调用方传入的 accessToken；否则 userToken → accessToken（~1h 有效）
+    const accessToken = opts.accessToken ?? (await this.currentUser({ fetcher, signal: opts.signal }))
+    const chatSessionId = opts.chatSessionId ?? (await this.createChatSession({ fetcher, signal: opts.signal, accessToken }))
 
-    let powHeader: string | undefined
+    // 主动 PoW（对齐 web 客户端行为）
+    const challenge = await this.fetchPowChallenge(fetcher, opts, accessToken)
+    const powHeader = solveAndBuildPowHeader(challenge, opts.signal)
+
     let attempts = 0
     while (attempts < 2) {
       attempts++
-      const resp = await this.postCompletion(fetcher, chatSessionId, flatPrompt, opts, powHeader)
+      const resp = await this.postCompletion(fetcher, chatSessionId, flatPrompt, opts, powHeader, accessToken)
       const needsPow = await this.detectPowRequired(resp)
       if (needsPow) {
         if (powHeader) {
           throw new DSWebProtocolError('pow_required after retry — solver may be stale')
         }
-        const challenge = await this.fetchPowChallenge(fetcher, opts)
-        powHeader = solveAndBuildPowHeader(challenge, opts.signal)
-        continue
+        const retryChallenge = await this.fetchPowChallenge(fetcher, opts, accessToken)
+        const retryHeader = solveAndBuildPowHeader(retryChallenge, opts.signal)
+        const retryResp = await this.postCompletion(fetcher, chatSessionId, flatPrompt, opts, retryHeader, accessToken)
+        yield* this.consumeSSE(retryResp, opts)
+        return
       }
       yield* this.consumeSSE(resp, opts)
       return
@@ -179,9 +190,10 @@ export class DeepSeekWebClient {
     prompt: string,
     opts: StreamChatOptions,
     powHeader: string | undefined,
+    accessToken: string,
   ): Promise<Response> {
     const headers = buildHeaders({
-      authorization: this.bearer(opts.accessToken),
+      authorization: this.bearer(accessToken),
       accept: 'text/event-stream',
       powResponse: powHeader,
     })
@@ -193,6 +205,7 @@ export class DeepSeekWebClient {
       ref_file_ids: [] as string[],
       thinking_enabled: opts.reasoning ?? false,
       search_enabled: opts.search ?? false,
+      preempt: false,
     }
     const resp = await fetcher(`${API_HOST}${ENDPOINTS.chatCompletion}`, {
       method: 'POST',
@@ -222,10 +235,10 @@ export class DeepSeekWebClient {
     return false
   }
 
-  private async fetchPowChallenge(fetcher: typeof fetch, opts: ClientOptions): Promise<PowChallenge> {
+  private async fetchPowChallenge(fetcher: typeof fetch, opts: ClientOptions, accessToken: string): Promise<PowChallenge> {
     const resp = await fetcher(`${API_HOST}${ENDPOINTS.createPowChallenge}`, {
       method: 'POST',
-      headers: buildHeaders({ authorization: this.bearer() }),
+      headers: buildHeaders({ authorization: this.bearer(accessToken) }),
       body: buildPowChallengeBody(COMPLETION_TARGET_PATH),
       signal: opts.signal,
       credentials: 'include',

@@ -104,6 +104,7 @@ describe('request bodies', () => {
       ref_file_ids: [],
       thinking_enabled: true,
       search_enabled: false,
+      preempt: false,
     })
     const body = JSON.parse(raw) as Record<string, unknown>
     expect(body.chat_session_id).toBe('sid-1')
@@ -113,6 +114,7 @@ describe('request bodies', () => {
     expect(body.ref_file_ids).toEqual([])
     expect(body.thinking_enabled).toBe(true)
     expect(body.search_enabled).toBe(false)
+    expect(body.preempt).toBe(false)
   })
   it('buildContinueBody 结构正确', () => {
     const body = JSON.parse(buildContinueBody('sid-1', 42)) as Record<string, unknown>

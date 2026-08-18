@@ -23,7 +23,7 @@ export const CLIENT_IDENTITY = {
   'x-client-platform': 'web',
   'x-client-version': '2.0.0',
   'x-client-bundle-id': 'com.deepseek.chat',
-  'x-client-locale': 'en_US',
+  'x-client-locale': 'en-US',
 } as const
 
 export interface Message {
@@ -116,6 +116,7 @@ export interface CompletionBody {
   ref_file_ids: string[]
   thinking_enabled: boolean
   search_enabled: boolean
+  preempt: boolean
 }
 
 export function buildCompletionBody(body: CompletionBody): string {
