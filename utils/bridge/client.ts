@@ -135,8 +135,8 @@ export class DeepSeekWebClient {
     } catch {
       throw new DSWebProtocolError('create_session: invalid JSON')
     }
-    const id = extractString(data, 'data.biz_data.id')
-    if (!id) throw new DSWebProtocolError('create_session: missing biz_data.id')
+    const id = extractChatSessionId(data)
+    if (!id) throw new DSWebProtocolError(`create_session: missing session id (response: ${summarizeJson(data)})`)
     return id
   }
 
@@ -305,6 +305,38 @@ function extractString(raw: unknown, dottedPath: string): string | undefined {
     }
   }
   return typeof cur === 'string' && cur.trim() ? cur.trim() : undefined
+}
+
+/**
+ * 提取 chat_session_id。服务端响应结构存在两种形态（参考 deepseek-cli/ds2api）：
+ *   1. { data: { biz_data: { id: "..." } } }
+ *   2. { data: { biz_data: { chat_session: { id: "..." } } } }
+ * 两种都兜底到对象根部的 id 字段。
+ */
+function extractChatSessionId(raw: unknown): string | undefined {
+  const direct = extractString(raw, 'data.biz_data.id')
+  if (direct) return direct
+  const nested = extractString(raw, 'data.biz_data.chat_session.id')
+  if (nested) return nested
+  // 兜底：任意层的 biz_data.id
+  if (raw && typeof raw === 'object') {
+    const data = ((raw as Record<string, unknown>).data ?? raw) as Record<string, unknown>
+    const bizData = (data.biz_data ?? data) as Record<string, unknown>
+    if (typeof bizData.id === 'string' && bizData.id.trim()) return bizData.id.trim()
+  }
+  return undefined
+}
+
+/** 把响应 JSON 截断成单行摘要，用于错误诊断（避免泄漏超长内容） */
+function summarizeJson(raw: unknown): string {
+  let text: string
+  try {
+    text = JSON.stringify(raw)
+  } catch {
+    text = String(raw)
+  }
+  if (text.length <= 120) return text
+  return `${text.slice(0, 120)}…`
 }
 
 function extractPowChallenge(raw: unknown): PowChallenge | null {

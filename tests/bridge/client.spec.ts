@@ -157,10 +157,20 @@ describe('DeepSeekWebClient.createChatSession', () => {
     expect(JSON.parse(String(init?.body))).toEqual({ agent: 'chat' })
   })
 
-  it('缺 biz_data.id → DSWebProtocolError', async () => {
+  it('从 biz_data.chat_session.id（嵌套结构）提取会话 id', async () => {
+    const fetcher = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ data: { biz_data: { chat_session: { id: 'sid-nested' } } } }))
+    const client = new DeepSeekWebClient({ userToken: 'tok' })
+    const id = await client.createChatSession({ fetcher: fetcher as typeof fetch })
+    expect(id).toBe('sid-nested')
+  })
+
+  it('缺会话 id → DSWebProtocolError（错误信息含响应摘要便于诊断）', async () => {
     const fetcher = vi.fn(async () => jsonResponse({ data: { biz_data: {} } }))
     const client = new DeepSeekWebClient({ userToken: 'tok' })
-    await expect(client.createChatSession({ fetcher: fetcher as typeof fetch })).rejects.toBeInstanceOf(DSWebProtocolError)
+    const err = await client.createChatSession({ fetcher: fetcher as typeof fetch }).catch((e) => e)
+    expect(err).toBeInstanceOf(DSWebProtocolError)
+    expect(String((err as Error).message)).toContain('create_session')
   })
 })
 
