@@ -8,12 +8,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "wxt",
-    "dev:firefox": "wxt -b firefox",
-    "build": "wxt build",
-    "build:firefox": "wxt build -b firefox",
-    "zip": "wxt zip",
-    "zip:firefox": "wxt zip -b firefox",
+    "dev": "node scripts/build-official-settings.mjs && wxt",
+    "dev:firefox": "node scripts/build-official-settings.mjs && wxt -b firefox",
+    "build": "node scripts/build-official-settings.mjs && wxt build",
+    "build:firefox": "node scripts/build-official-settings.mjs && wxt build -b firefox",
+    "zip": "node scripts/build-official-settings.mjs && wxt zip",
+    "zip:firefox": "node scripts/build-official-settings.mjs && wxt zip -b firefox",
     "compile": "tsc --noEmit",
     "postinstall": "wxt prepare",
     "test": "vitest run",
