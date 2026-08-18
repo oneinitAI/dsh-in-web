@@ -194,7 +194,7 @@ export function App() {
         reasoning: settings?.reasoning ?? true,
         search: settings?.search ?? false,
       },
-    })
+    }).catch(() => {})
   }
 
   function stop() {
