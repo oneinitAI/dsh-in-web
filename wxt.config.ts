@@ -17,8 +17,10 @@ export default defineConfig({
     host_permissions: ['https://chat.deepseek.com/*'],
     web_accessible_resources: [
       {
-        // 允许页面 iframe 加载 dsh 面板（dsh-ui.content.ts 注入）
-        resources: ['sidepanel.html', 'chunks/*', 'assets/*'],
+        // 允许页面 iframe 加载 dsh 面板（dsh-ui.content.ts 注入）。
+        // dsh-web/** 覆盖嵌套 iframe（sidepanel.html → dsh-web/index.html → chunks/plugins/assets）
+        // 在网页上下文加载扩展资源所需的所有 URL。
+        resources: ['sidepanel.html', 'chunks/*', 'assets/*', 'dsh-web/**'],
         matches: ['https://chat.deepseek.com/*'],
       },
     ],

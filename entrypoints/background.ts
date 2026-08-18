@@ -24,7 +24,7 @@ import { buildAgentTools } from '@/utils/agent/tools'
 import { Workspace } from '@/utils/fs/workspace'
 import type { Skill } from '@/utils/skills/skill'
 import type { LlmStreamEvent } from '@/utils/plugin/host'
-import { getSettings } from '@/utils/settings/settings'
+import { getSettings, patchSettings, type DshSettings } from '@/utils/settings/settings'
 
 interface PageState {
   authPresent: boolean
@@ -324,11 +324,11 @@ export default defineBackground(() => {
     readonly payload?: unknown
   }
 
-  /** rpcErrorSchema 要求 code/message/details 三字段（details 必填）；当前骨架只产出 code='internal' */
+  /** rpcErrorSchema 要求 code/message/details 三字段（details 必填）；details 按 code 分支对齐，允许任意键值 */
   interface DshRpcError {
     readonly code: string
     readonly message: string
-    readonly details: Readonly<Record<string, never>>
+    readonly details: Readonly<Record<string, unknown>>
   }
 
   type DshRpcResult =
@@ -373,12 +373,368 @@ export default defineBackground(() => {
 
   /** host.describe 最小可用桩（对齐 hostDescribeValueSchema：version+cwd 必填，attachedSessions 为 int >= 0） */
   function dshDescribeValue(): { version: string; cwd: string; attachedSessions: number; canOpenPath: boolean } {
-    return { version: '0.0.0-dsh-in-web-bridge', cwd: '<dsh-in-web>', attachedSessions: 0, canOpenPath: false }
+    return { version: '0.1.0-dsh-in-web-bridge', cwd: '<dsh-in-web>', attachedSessions: 0, canOpenPath: false }
   }
 
   /** 未桥接方法：返回合法错误包络，让 UI 显示干净错误而非崩溃 */
   function dshNotImplemented(method: string): DshRpcResult {
     return { ok: false, error: { code: 'internal', message: `dsh RPC not yet bridged: ${method}`, details: {} } }
+  }
+
+  // ── dsh RPC 真实数据桥接 ──────────────────────────────────────────
+  // 分派表把 harness 的 RPC 方法映射到本地能力：
+  //  - host.describe / session.*（经 chat-stream 桥）/ workspace.* / skill.list /
+  //    settings.*（chrome.storage）/ llm.* 返回真实或合理数据
+  //  - 其余方法（subagent/goal/agentPreset/credentials/host 目录等）返回合法错误包络
+  // value 形状对齐 deepseek-harness apiproxy 各 domain 的 Value schema，
+  // 客户端 AbstractApiClient 会做第二层 zod 校验（UNARY_VALUE_SCHEMAS）。
+
+  /** 固定单工作区（本地 IndexedDB 虚拟 FS 映射为 harness 的一个 workspace 实体） */
+  const DSH_WORKSPACE_ID = 'dsh-in-web'
+  const DSH_WORKSPACE_TITLE_KEY = 'dsh-workspace-title'
+  const DSH_WORKSPACE_CREATED_AT = new Date().toISOString()
+
+  /** 固定模型目录（llm.models / session.models 共用；参考 utils/bridge/protocol.ts 的模型面） */
+  const DSH_MODEL_GROUPS: ReadonlyArray<{
+    readonly id: string
+    readonly name: string
+    readonly models: ReadonlyArray<{ readonly id: string; readonly name: string }>
+  }> = [
+    {
+      id: 'deepseek',
+      name: 'DeepSeek',
+      models: [
+        { id: 'deepseek-chat', name: 'DeepSeek Chat' },
+        { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner' },
+      ],
+    },
+  ]
+
+  /** harness workspaceViewSchema 形状（workspaceId/path/title/sessionIds/createdAt/updatedAt） */
+  interface DshWorkspaceView {
+    workspaceId: string
+    path: string
+    title: string
+    sessionIds: string[]
+    createdAt: string
+    updatedAt: string
+  }
+
+  let virtualSessionSeq = 0
+  function mintVirtualSessionId(): string {
+    virtualSessionSeq += 1
+    return `sess-${Date.now()}-${virtualSessionSeq}`
+  }
+
+  async function getWorkspaceTitle(): Promise<string> {
+    try {
+      const stored = await chrome.storage.local.get(DSH_WORKSPACE_TITLE_KEY)
+      const title = stored[DSH_WORKSPACE_TITLE_KEY]
+      return typeof title === 'string' && title.trim() ? title.trim() : 'dsh-in-web'
+    } catch {
+      return 'dsh-in-web'
+    }
+  }
+
+  async function setWorkspaceTitle(title: string): Promise<void> {
+    try {
+      await chrome.storage.local.set({ [DSH_WORKSPACE_TITLE_KEY]: title.trim() || 'dsh-in-web' })
+    } catch {
+      // 写失败静默（非扩展环境）
+    }
+  }
+
+  async function buildWorkspaceView(): Promise<DshWorkspaceView> {
+    const title = await getWorkspaceTitle()
+    return {
+      workspaceId: DSH_WORKSPACE_ID,
+      path: '/',
+      title,
+      sessionIds: [],
+      createdAt: DSH_WORKSPACE_CREATED_AT,
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  /** 提取 session.prompt content 里的纯文本（text 类型 part） */
+  function extractPromptText(content: unknown): string {
+    if (!Array.isArray(content)) return ''
+    const parts: string[] = []
+    for (const part of content) {
+      if (typeof part !== 'object' || part === null) continue
+      const p = part as { type?: unknown; text?: unknown }
+      if (p.type !== 'text') continue
+      const text = typeof p.text === 'string' ? p.text.trim() : ''
+      if (text) parts.push(text)
+    }
+    return parts.join('\n\n')
+  }
+
+  type DshRpcHandler = (payload: unknown) => DshRpcResult | Promise<DshRpcResult>
+
+  // ── session.* ────────────────────────────────────────────────
+  function dshSessionCreate(payload: unknown): DshRpcResult {
+    const p = (payload ?? {}) as { sessionId?: unknown }
+    const sessionId = typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : mintVirtualSessionId()
+    return { ok: true, value: { sessionId } }
+  }
+
+  function dshSessionPrompt(payload: unknown): DshRpcResult {
+    const p = (payload ?? {}) as { content?: unknown }
+    const text = extractPromptText(p.content)
+    if (!text) {
+      return {
+        ok: false,
+        error: { code: 'bad-request', message: 'session.prompt: empty text content', details: { issues: [] } },
+      }
+    }
+    // 复用现有 chat-stream 桥：SW runStream → sendToPage → content script（页面 origin）流式聊天
+    void runStream([{ role: 'user', content: text }], currentReasoning, currentSearch)
+    return { ok: true, value: { accepted: true } }
+  }
+
+  function dshSessionCancel(): DshRpcResult {
+    if (currentRequestId) {
+      void sendToPage({ topic: EXT_TOPIC_CHAT_STREAM_STOP, payload: { requestId: currentRequestId } }).catch(
+        () => {},
+      )
+      currentRequestId = undefined
+    }
+    pushBridgeEvent({ kind: 'error', error: 'stopped' })
+    return { ok: true, value: { accepted: true } }
+  }
+
+  function dshSessionSelectModel(payload: unknown): DshRpcResult {
+    const p = (payload ?? {}) as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
+    const provider = typeof p.provider === 'string' && p.provider ? p.provider : 'deepseek'
+    const model = typeof p.model === 'string' && p.model ? p.model : 'deepseek-chat'
+    const selected: { provider: string; model: string; reasoningEffort?: string } = { provider, model }
+    if (typeof p.reasoningEffort === 'string' && p.reasoningEffort) selected.reasoningEffort = p.reasoningEffort
+    return { ok: true, value: { selected } }
+  }
+
+  function dshSessionRename(payload: unknown): DshRpcResult {
+    const p = (payload ?? {}) as { title?: unknown }
+    const title = typeof p.title === 'string' && p.title.trim() ? p.title.trim() : 'Untitled'
+    return { ok: true, value: { title, seq: 0 } }
+  }
+
+  function dshSessionFork(): DshRpcResult {
+    // 虚拟子会话（无持久化，fork 即派发一个新的会话 id）
+    return { ok: true, value: { sessionId: mintVirtualSessionId() } }
+  }
+
+  function dshSessionModels(): DshRpcResult {
+    return {
+      ok: true,
+      value: {
+        current: { provider: 'deepseek', model: 'deepseek-chat' },
+        routable: true,
+        groups: DSH_MODEL_GROUPS,
+        failures: [],
+      },
+    }
+  }
+
+  // ── workspace.*（桥接到本地 IndexedDB Workspace）────────────────
+  async function dshWorkspaceList(): Promise<DshRpcResult> {
+    await getQueryWs() // 初始化本地 IndexedDB 工作区
+    const view = await buildWorkspaceView()
+    return { ok: true, value: { items: [view], archivedSessionIds: [] } }
+  }
+
+  async function dshWorkspaceCreate(): Promise<DshRpcResult> {
+    await getQueryWs()
+    const view = await buildWorkspaceView()
+    return { ok: true, value: { workspace: view, created: false } }
+  }
+
+  async function dshWorkspaceRename(payload: unknown): Promise<DshRpcResult> {
+    const p = (payload ?? {}) as { title?: unknown }
+    const title = typeof p.title === 'string' && p.title.trim() ? p.title.trim() : 'dsh-in-web'
+    await setWorkspaceTitle(title)
+    await getQueryWs()
+    const view = await buildWorkspaceView()
+    return { ok: true, value: { workspace: view } }
+  }
+
+  async function dshWorkspaceDelete(): Promise<DshRpcResult> {
+    await getQueryWs()
+    return { ok: true, value: { deleted: true } }
+  }
+
+  async function dshWorkspaceInsertSessionBefore(): Promise<DshRpcResult> {
+    await getQueryWs()
+    const view = await buildWorkspaceView()
+    return { ok: true, value: { workspace: view } }
+  }
+
+  // ── skill.list（本地 skill 库）──────────────────────────────────
+  function dshSkillList(): DshRpcResult {
+    return {
+      ok: true,
+      value: {
+        skills: skills.map((s) => ({ name: s.name, description: s.description, modelInvocable: true })),
+      },
+    }
+  }
+
+  // ── settings.*（chrome.storage.local 的 DshSettings 命名空间视图）──
+  const DSH_SETTINGS_NS = 'dsh-in-web'
+  let settingsRevision = 0
+
+  interface DshSettingsNamespaceView {
+    ns: string
+    schema: unknown
+    value: unknown
+    applies: 'live' | 'restart'
+    secrets: { path: string[]; set: boolean }[]
+    revision: number
+  }
+
+  async function buildSettingsNamespaceView(): Promise<DshSettingsNamespaceView> {
+    const settings = await getSettings()
+    return {
+      ns: DSH_SETTINGS_NS,
+      schema: {},
+      value: { ...settings },
+      applies: 'live',
+      secrets: [],
+      revision: settingsRevision,
+    }
+  }
+
+  function dshSettingsNotExposed(ns: unknown): DshRpcResult {
+    return {
+      ok: false,
+      error: {
+        code: 'settings-not-exposed',
+        message: `settings namespace not exposed: ${String(ns)}`,
+        details: { ns: String(ns) },
+      },
+    }
+  }
+
+  function dshSettingsConflict(expected: number, actual: number): DshRpcResult {
+    return {
+      ok: false,
+      error: {
+        code: 'settings-conflict',
+        message: 'settings revision conflict',
+        details: { ns: DSH_SETTINGS_NS, expected, actual },
+      },
+    }
+  }
+
+  /** 校验命名空间 + 可选 expectedRevision；不满足返回错误包络，满足返回 null */
+  function checkSettingsWrite(payload: { ns?: unknown; expectedRevision?: unknown }): DshRpcResult | null {
+    if (payload.ns !== DSH_SETTINGS_NS) return dshSettingsNotExposed(payload.ns)
+    if (typeof payload.expectedRevision === 'number' && payload.expectedRevision !== settingsRevision) {
+      return dshSettingsConflict(payload.expectedRevision, settingsRevision)
+    }
+    return null
+  }
+
+  async function dshSettingsDescribe(): Promise<DshRpcResult> {
+    const view = await buildSettingsNamespaceView()
+    return { ok: true, value: { writable: true, hasDocument: false, namespaces: [view] } }
+  }
+
+  async function dshSettingsUpdate(payload: unknown): Promise<DshRpcResult> {
+    const p = (payload ?? {}) as { ns?: unknown; patch?: unknown; expectedRevision?: unknown }
+    const denied = checkSettingsWrite(p)
+    if (denied) return denied
+    const patch = (p.patch ?? {}) as Record<string, unknown>
+    if (Object.keys(patch).length > 0) {
+      await patchSettings(patch as Partial<DshSettings>)
+      settingsRevision += 1
+    }
+    return { ok: true, value: await buildSettingsNamespaceView() }
+  }
+
+  async function dshSettingsReplace(payload: unknown): Promise<DshRpcResult> {
+    const p = (payload ?? {}) as { ns?: unknown; section?: unknown; expectedRevision?: unknown }
+    const denied = checkSettingsWrite(p)
+    if (denied) return denied
+    const section = (p.section ?? {}) as Record<string, unknown>
+    if (Object.keys(section).length > 0) {
+      await patchSettings(section as Partial<DshSettings>)
+      settingsRevision += 1
+    }
+    return { ok: true, value: await buildSettingsNamespaceView() }
+  }
+
+  async function dshSettingsMutate(payload: unknown): Promise<DshRpcResult> {
+    const p = (payload ?? {}) as { ns?: unknown; ops?: unknown; expectedRevision?: unknown }
+    const denied = checkSettingsWrite(p)
+    if (denied) return denied
+    const patch: Record<string, unknown> = {}
+    if (Array.isArray(p.ops)) {
+      for (const op of p.ops) {
+        if (typeof op !== 'object' || op === null) continue
+        const o = op as { op?: unknown; path?: unknown; value?: unknown }
+        if (!Array.isArray(o.path) || o.path.length === 0) continue
+        const key = String(o.path[0])
+        if (o.op === 'set') patch[key] = o.value
+        else if (o.op === 'unset') patch[key] = undefined
+      }
+    }
+    if (Object.keys(patch).length > 0) {
+      await patchSettings(patch as Partial<DshSettings>)
+      settingsRevision += 1
+    }
+    return { ok: true, value: await buildSettingsNamespaceView() }
+  }
+
+  // ── llm.*（固定模型目录）────────────────────────────────────────
+  function dshLlmProviders(): DshRpcResult {
+    return {
+      ok: true,
+      value: {
+        providers: [
+          {
+            provider: 'deepseek',
+            displayName: 'DeepSeek (网页版)',
+            settingsNs: DSH_SETTINGS_NS,
+            settingsPath: ['provider'],
+            active: true,
+          },
+        ],
+      },
+    }
+  }
+
+  function dshLlmModels(): DshRpcResult {
+    return { ok: true, value: { groups: DSH_MODEL_GROUPS, failures: [] } }
+  }
+
+  // ── 分派表（未列出的方法回落到 dshNotImplemented 错误包络）────────
+  const dshRpcHandlers: Record<string, DshRpcHandler> = {
+    'host.describe': () => ({ ok: true, value: dshDescribeValue() }),
+    'session.list': () => ({ ok: true, value: { items: [] } }),
+    'session.search': () => ({ ok: true, value: { items: [], hasMore: false } }),
+    'session.create': dshSessionCreate,
+    'session.history': () => ({ ok: true, value: { events: [], hasMore: false } }),
+    'session.models': dshSessionModels,
+    'session.selectModel': dshSessionSelectModel,
+    'session.rename': dshSessionRename,
+    'session.fork': dshSessionFork,
+    'session.prompt': dshSessionPrompt,
+    'session.cancel': dshSessionCancel,
+    'workspace.list': dshWorkspaceList,
+    'workspace.create': dshWorkspaceCreate,
+    'workspace.rename': dshWorkspaceRename,
+    'workspace.delete': dshWorkspaceDelete,
+    'workspace.insertBefore': () => ({ ok: true, value: { workspaceIds: [DSH_WORKSPACE_ID] } }),
+    'workspace.insertSessionBefore': dshWorkspaceInsertSessionBefore,
+    'workspace.archiveSession': () => ({ ok: true, value: { archivedSessionIds: [] } }),
+    'skill.list': dshSkillList,
+    'settings.describe': dshSettingsDescribe,
+    'settings.update': dshSettingsUpdate,
+    'settings.replace': dshSettingsReplace,
+    'settings.mutate': dshSettingsMutate,
+    'llm.providers': dshLlmProviders,
+    'llm.models': dshLlmModels,
   }
 
   async function handleDshRpc(message: DshRpcEnvelope): Promise<DshRpcReply> {
@@ -392,8 +748,21 @@ export default defineBackground(() => {
       }
     }
     const req = message.body
-    const result: DshRpcResult =
-      req.method === 'host.describe' ? { ok: true, value: dshDescribeValue() } : dshNotImplemented(req.method)
+    const handler = dshRpcHandlers[req.method]
+    let result: DshRpcResult
+    try {
+      result = handler ? await handler(req.payload) : dshNotImplemented(req.method)
+    } catch (err) {
+      // 任何实现抛错都收拢为合法错误包络，避免把异常泄漏给 iframe
+      result = {
+        ok: false,
+        error: {
+          code: 'internal',
+          message: `dsh RPC failed: ${req.method}: ${err instanceof Error ? err.message : String(err)}`,
+          details: {},
+        },
+      }
+    }
     return { kind: 'dsh-rpc:result', body: dshResponse(req.rpcId, result) }
   }
 
