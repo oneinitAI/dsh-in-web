@@ -257,3 +257,236 @@ body {
   background: #a0392f;
   color: #fff;
 }
+
+/* ── Wave 4.2 标签页 + 文件树 + skill 库 + 提示词 ───────── */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: #1e2128;
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: #9aa0a8;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.tab--active {
+  background: #2b6cb0;
+  color: #fff;
+}
+
+.files {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 200px;
+}
+
+.files__search {
+  width: 100%;
+  background: #1e2128;
+  border: 1px solid #333845;
+  border-radius: 8px;
+  color: #e6e8eb;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+}
+
+.files__search:focus {
+  outline: none;
+  border-color: #4a5568;
+}
+
+.files__tree {
+  flex: 1;
+  overflow-y: auto;
+  background: #1e2128;
+  border-radius: 8px;
+  padding: 8px;
+  max-height: 40vh;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 3px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tree-row:hover {
+  background: #262b36;
+}
+
+.tree-row--active {
+  background: #2b3a4a;
+  color: #d6e4f0;
+}
+
+.tree-row__icon {
+  color: #6a7078;
+  width: 10px;
+  text-align: center;
+}
+
+.tree-row__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-row__meta {
+  margin-left: auto;
+  color: #6a7078;
+  font-size: 10px;
+  padding-right: 4px;
+}
+
+.files__preview {
+  background: #1e2128;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.files__preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid #2a2f3a;
+}
+
+.files__preview-path {
+  font-size: 11px;
+  color: #9aa0a8;
+}
+
+.files__preview-body {
+  margin: 0;
+  padding: 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #c8cdd4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.skills {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  overflow-y: auto;
+  max-height: 70vh;
+}
+
+.skill {
+  background: #1e2128;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.skill__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.skill__head::-webkit-details-marker {
+  display: none;
+}
+
+.skill__name {
+  color: #5fd38a;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.skill__desc {
+  color: #9aa0a8;
+  font-size: 11px;
+  flex: 1;
+}
+
+.skill__body {
+  margin: 8px 0 0;
+  padding: 8px;
+  background: #16181d;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #c8cdd4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.prompts__label {
+  font-size: 11px;
+  color: #9aa0a8;
+  margin-top: 4px;
+}
+
+.prompts__src,
+.prompts__vars {
+  width: 100%;
+  resize: vertical;
+  background: #1e2128;
+  border: 1px solid #333845;
+  border-radius: 8px;
+  color: #e6e8eb;
+  font: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+  box-sizing: border-box;
+}
+
+.prompts__src:focus,
+.prompts__vars:focus {
+  outline: none;
+  border-color: #4a5568;
+}
+
+.prompts__out {
+  margin: 0;
+  background: #1e2128;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #c8cdd4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}

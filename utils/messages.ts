@@ -129,3 +129,13 @@ export const EXT_TOPIC_CHAT_STREAM_STOP = 'chat-stream-stop'
 export interface ChatStreamStopPayload {
   requestId: string
 }
+
+// ── panel-query：Side Panel → SW 的数据查询（文件树 / skill 库）─────────────
+
+/** UI 查询工作区数据；SW 以 sendResponse 返回 */
+export const CMD_PANEL_QUERY = 'panel-query'
+export interface PanelQueryPayload {
+  /** 'list-files' 返回 { entries: FsEntry[] }；'read-file' 返回 { content?: string }；'list-skills' 返回 { skills: Skill[] } */
+  cmd: 'list-files' | 'read-file' | 'list-skills'
+  path?: string
+}

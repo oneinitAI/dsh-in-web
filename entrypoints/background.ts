@@ -71,6 +71,16 @@ export default defineBackground(() => {
   const panelPorts = new Set<chrome.runtime.Port>()
   let requestSeq = 0
 
+  /** 供 panel-query 使用的共享工作区（懒加载） */
+  let queryWs: Workspace | null = null
+  async function getQueryWs(): Promise<Workspace> {
+    if (!queryWs) {
+      queryWs = new Workspace({ sandboxMode: 'workspace-write', dbName: 'dsh-in-web-workspace' })
+      await queryWs.init()
+    }
+    return queryWs
+  }
+
   /** 通知所有已连接 side panel */
   function broadcast(topic: string, payload: unknown) {
     for (const port of panelPorts) {
@@ -149,6 +159,31 @@ export default defineBackground(() => {
       currentSessionId = undefined
       sendResponse({ ok: true })
       return
+    }
+
+    // ── Side Panel 数据查询（文件树 / skill 库）────────────────
+    if (topic === 'panel-query') {
+      const { cmd, path } = (message as { payload?: { cmd?: string; path?: string } }).payload ?? {}
+      void (async () => {
+        try {
+          if (cmd === 'list-files') {
+            const ws = await getQueryWs()
+            const root = await ws.list('/')
+            sendResponse({ ok: true, entries: root })
+          } else if (cmd === 'read-file' && path) {
+            const ws = await getQueryWs()
+            const content = await ws.readText(path)
+            sendResponse({ ok: true, content: content ?? null })
+          } else if (cmd === 'list-skills') {
+            sendResponse({ ok: true, skills })
+          } else {
+            sendResponse({ ok: false, error: `unknown query: ${cmd}` })
+          }
+        } catch (err) {
+          sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) })
+        }
+      })()
+      return true // 异步 sendResponse
     }
   })
 
