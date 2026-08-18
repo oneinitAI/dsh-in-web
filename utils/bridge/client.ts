@@ -104,6 +104,7 @@ export class DeepSeekWebClient {
       method: 'GET',
       headers: buildHeaders({ authorization: this.bearer(), contentType: null }),
       signal: opts.signal,
+      credentials: 'include',
     })
     await this.guard(resp)
     if (!resp.ok) throw new DSWebProtocolError(`users/current: HTTP ${resp.status}`)
@@ -126,6 +127,7 @@ export class DeepSeekWebClient {
       headers: buildHeaders({ authorization: this.bearer() }),
       body: buildCreateSessionBody(),
       signal: opts.signal,
+      credentials: 'include',
     })
     await this.guard(resp)
     if (!resp.ok) throw new DSWebProtocolError(`create_session: HTTP ${resp.status}`)
@@ -197,6 +199,7 @@ export class DeepSeekWebClient {
       headers,
       body: buildCompletionBody(payload),
       signal: opts.signal,
+      credentials: 'include',
     })
     await this.guard(resp)
     return resp
@@ -225,6 +228,7 @@ export class DeepSeekWebClient {
       headers: buildHeaders({ authorization: this.bearer() }),
       body: buildPowChallengeBody(COMPLETION_TARGET_PATH),
       signal: opts.signal,
+      credentials: 'include',
     })
     await this.guard(resp)
     if (!resp.ok) throw new DSWebProtocolError(`create_pow_challenge: HTTP ${resp.status}`)

@@ -50,6 +50,11 @@ export default defineContentScript({
           // 应 SW 请求回传最新 token
           postUp('page-ready', { authPresent: Boolean(readUserToken()), token: readUserToken(), url: location.href })
         }
+        if (payload?.cmd === 'context-invalidated') {
+          // 扩展已 reload，本页面旧上下文失效 —— 停轮询，提示刷新
+          clearInterval(timer)
+          console.warn('[dsh] 扩展已重新加载，本页面上下文失效 —— 请刷新 chat.deepseek.com 页面。')
+        }
       }
     })
 

@@ -13,6 +13,19 @@ export default defineContentScript({
     const NS = 'dsh-in-web'
     console.log('[dsh] bridge 注入完成 (isolated world)')
 
+    /** 扩展 reload 后旧上下文失效 —— 停转发并提示刷新页面 */
+    let contextDead = false
+    function notifyContextInvalidated() {
+      if (contextDead) return
+      contextDead = true
+      console.warn('[dsh] 扩展上下文已失效（扩展已重新加载）—— 请刷新本页面。')
+      try {
+        window.postMessage({ ns: NS, dir: 'down', topic: 'page-command', payload: { cmd: 'context-invalidated' } }, '*')
+      } catch {
+        /* ignore */
+      }
+    }
+
     // MAIN world（up）→ SW
     window.addEventListener('message', (event: MessageEvent) => {
       const data = event.data
@@ -23,12 +36,20 @@ export default defineContentScript({
         (data as { dir?: unknown }).dir === 'up'
       ) {
         const { topic, payload } = data as { topic: string; payload?: unknown }
-        void chrome.runtime.sendMessage({ topic: 'page-event', payload: { topic, payload } })
+        if (contextDead) return
+        try {
+          void chrome.runtime.sendMessage({ topic: 'page-event', payload: { topic, payload } })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('Extension context invalidated')) notifyContextInvalidated()
+          else console.error('[dsh] sendMessage 失败:', err)
+        }
       }
     })
 
     // SW → MAIN world（down）
     chrome.runtime.onMessage.addListener((message) => {
+      if (contextDead) return
       if (typeof message === 'object' && message !== null) {
         const { topic } = message as { topic?: unknown }
         if (topic === 'page-command') {
