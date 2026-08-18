@@ -113,6 +113,29 @@ describe('DeepSeekWebClient.streamChat', () => {
     expect((init?.headers as Record<string, string>).authorization).toBe('Bearer access-token-1')
   })
 
+  it('search 选项透传到 completion body（search_enabled）', async () => {
+    const handler = async (_url: string, _init?: RequestInit): Promise<Response> =>
+      sseResponse('data: {"v":"FINISHED","p":"response/status"}\n')
+    const fetcher = vi.fn(chatAwareFetcher(handler))
+    const client = new DeepSeekWebClient({ userToken: 'tok' })
+    await collect(client.streamChat(
+      [{ role: 'user', content: '查一下' }],
+      { search: true, fetcher: fetcher as typeof fetch },
+    ))
+    const [, init] = fetcher.mock.calls[3]!
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    expect(body.search_enabled).toBe(true)
+    // 未传 search 时默认 false（防意外开启）
+    const fetcher2 = vi.fn(chatAwareFetcher(handler))
+    await collect(new DeepSeekWebClient({ userToken: 'tok' }).streamChat(
+      [{ role: 'user', content: 'hi' }],
+      { fetcher: fetcher2 as typeof fetch },
+    ))
+    const [, init2] = fetcher2.mock.calls[3]!
+    const body2 = JSON.parse(String(init2?.body)) as Record<string, unknown>
+    expect(body2.search_enabled).toBe(false)
+  })
+
   it('completion 请求总带有效的 x-ds-pow-response（主动 PoW）', async () => {
     const completionPow: string[] = []
     const fetcher = vi.fn(chatAwareFetcher(async (url: string, init?: RequestInit) => {
