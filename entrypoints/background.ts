@@ -735,6 +735,15 @@ export default defineBackground(() => {
     'settings.mutate': dshSettingsMutate,
     'llm.providers': dshLlmProviders,
     'llm.models': dshLlmModels,
+    // agentPreset.list 由 dsh UI 启动时即调用（Agent 预设面板），返回空列表
+    // 而非错误包络，避免面板显示「无法加载 Agent 预设」
+    'agentPreset.list': () => ({
+      ok: true,
+      value: { presets: [], authorable: false, hasDocument: false },
+    }),
+    // credentials.describe / subagent.list：对应面板启动即调用，返回空数据
+    'credentials.describe': () => ({ ok: true, value: { credentials: {} } }),
+    'subagent.list': () => ({ ok: true, value: { entries: [], parentAvailable: true } }),
   }
 
   async function handleDshRpc(message: DshRpcEnvelope): Promise<DshRpcReply> {
