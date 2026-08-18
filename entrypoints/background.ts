@@ -579,7 +579,15 @@ export default defineBackground(() => {
     }
   }
 
-  // ── settings.*（chrome.storage.local 的 DshSettings 命名空间视图）──
+  // ── settings.*（官方 dsh settings 体系：多 namespace 注册表 + chrome.storage.local 持久化）──
+  // 把官方 harness 的 settings 命名空间（主题/语言/对话/插件配置等）搬到浏览器：
+  //  - schemaJSON 是 schemastery toJSON 形状（{ uid, refs }），client 端用
+  //    rehydrateSchema(namespace.schema) 还原、validateDraft 校验、nodeAtPath 解析；
+  //    形状已从 harness 运行时导出验证（ui-conversation 示例见任务说明）。
+  //  - 每个 namespace 的值存 chrome.storage.local（key = 'dsh-official-settings'），
+  //    user section = 该命名空间下用户覆盖；value = 默认值 + user 覆盖。
+  //  - dsh-in-web 自身命名空间保留（llm.providers 的 settingsNs 依赖），
+  //    DshSettings（dshMode 等）仍是扩展自有配置，不走官方 namespace。
   const DSH_SETTINGS_NS = 'dsh-in-web'
   let settingsRevision = 0
 
@@ -592,6 +600,229 @@ export default defineBackground(() => {
     applies: 'live' | 'restart'
     secrets: { path: string[]; set: boolean }[]
     revision: number
+  }
+
+  // ── schemastery toJSON 类型（结构 = { uid, refs: { '<uid>': node } }）──
+  interface DshSchemaMeta {
+    readonly required?: boolean
+    readonly default?: unknown
+    readonly step?: number
+    readonly min?: number
+    readonly role?: string
+    readonly [key: string]: unknown
+  }
+
+  interface DshSchemaRef {
+    readonly type: 'const' | 'union' | 'object' | 'string' | 'number'
+    readonly meta: DshSchemaMeta
+    /** const 节点字面量 */
+    readonly value?: unknown
+    /** union 节点：子节点 uid 列表 */
+    readonly list?: readonly number[]
+    /** object 节点：字段 → 子节点 uid */
+    readonly dict?: Readonly<Record<string, number>>
+  }
+
+  /** schemastery toJSON：client 端 rehydrateSchema = new Schema(json)，接受该形状 */
+  interface DshSchemaJSON {
+    readonly uid: number
+    readonly refs: Readonly<Record<string, DshSchemaRef>>
+  }
+
+  interface DshSettingsRegistryEntry {
+    readonly ns: string
+    readonly schemaJSON: DshSchemaJSON
+    readonly defaultValue: Readonly<Record<string, unknown>>
+  }
+
+  // ── 官方 9 个白名单 namespace（schema + 默认值来自 harness 官方源码）──
+  // uid 从 1 起递增、互不重叠；refs 以字符串 uid 为 key，节点间用数字 uid 引用。
+  const DSH_SETTINGS_REGISTRY: readonly DshSettingsRegistryEntry[] = [
+    {
+      ns: 'ui-theme',
+      schemaJSON: {
+        uid: 5,
+        refs: {
+          '1': { type: 'const', meta: { required: true }, value: 'light' },
+          '2': { type: 'const', meta: { required: true }, value: 'dark' },
+          '3': { type: 'const', meta: { required: true }, value: 'system' },
+          '4': { type: 'union', meta: { default: 'system' }, list: [1, 2, 3] },
+          '5': { type: 'object', meta: { default: {} }, dict: { preference: 4 } },
+        },
+      },
+      defaultValue: { preference: 'system' },
+    },
+    {
+      ns: 'locale',
+      schemaJSON: {
+        uid: 9,
+        refs: {
+          '6': { type: 'const', meta: { required: true }, value: 'zh' },
+          '7': { type: 'const', meta: { required: true }, value: 'en' },
+          '8': { type: 'union', meta: { required: false }, list: [6, 7] },
+          '9': { type: 'object', meta: { default: {} }, dict: { preference: 8 } },
+        },
+      },
+      defaultValue: {},
+    },
+    {
+      ns: 'ui-conversation',
+      schemaJSON: {
+        uid: 13,
+        refs: {
+          '10': { type: 'const', meta: { required: true }, value: 'queue' },
+          '11': { type: 'const', meta: { required: true }, value: 'steer' },
+          '12': { type: 'union', meta: { default: 'queue' }, list: [10, 11] },
+          '13': { type: 'object', meta: { default: {} }, dict: { busyEnter: 12 } },
+        },
+      },
+      defaultValue: { busyEnter: 'queue' },
+    },
+    {
+      ns: 'agent-loop',
+      schemaJSON: {
+        uid: 15,
+        refs: {
+          '14': { type: 'number', meta: { step: 1, min: 1, default: 10 } },
+          '15': { type: 'object', meta: { default: {} }, dict: { maxParallelToolCalls: 14 } },
+        },
+      },
+      defaultValue: { maxParallelToolCalls: 10 },
+    },
+    {
+      ns: 'shell',
+      schemaJSON: {
+        uid: 18,
+        refs: {
+          '16': { type: 'number', meta: { default: 120000 } },
+          '17': { type: 'number', meta: { default: 64000 } },
+          '18': { type: 'object', meta: { default: {} }, dict: { timeoutMs: 16, maxOutputBytes: 17 } },
+        },
+      },
+      defaultValue: { timeoutMs: 120000, maxOutputBytes: 64000 },
+    },
+    {
+      ns: 'permission',
+      schemaJSON: {
+        uid: 22,
+        refs: {
+          '19': { type: 'const', meta: { required: true }, value: 'workspace-write' },
+          '20': { type: 'const', meta: { required: true }, value: 'danger-full-access' },
+          '21': { type: 'union', meta: { required: true }, list: [19, 20] },
+          '22': { type: 'object', meta: { default: {} }, dict: { defaultPreset: 21 } },
+        },
+      },
+      defaultValue: { defaultPreset: 'workspace-write' },
+    },
+    {
+      ns: 'web-search-deepseek',
+      schemaJSON: {
+        uid: 26,
+        refs: {
+          '23': { type: 'string', meta: { role: 'credential-ref', default: 'DEEPSEEK_API_KEY' } },
+          '24': { type: 'string', meta: {} },
+          '25': { type: 'number', meta: { step: 1, min: 1, default: 5 } },
+          '26': { type: 'object', meta: { default: {} }, dict: { apiKeyEnv: 23, baseURL: 24, maxUses: 25 } },
+        },
+      },
+      defaultValue: { apiKeyEnv: 'DEEPSEEK_API_KEY', maxUses: 5 },
+    },
+    {
+      ns: 'agent-presets',
+      schemaJSON: {
+        uid: 28,
+        refs: {
+          '27': { type: 'string', meta: {} },
+          '28': { type: 'object', meta: { default: {} }, dict: { default: 27 } },
+        },
+      },
+      defaultValue: {},
+    },
+    {
+      ns: 'ui-onboarding',
+      schemaJSON: {
+        uid: 30,
+        refs: {
+          '29': { type: 'string', meta: {} },
+          '30': { type: 'object', meta: { default: {} }, dict: { welcomeNoticeVersion: 29 } },
+        },
+      },
+      defaultValue: {},
+    },
+  ]
+
+  const OFFICIAL_SETTINGS_STORAGE_KEY = 'dsh-official-settings'
+
+  /** 各官方 namespace 的用户覆盖段（Record<ns, Record<字段, 值>>），内存 + storage.local */
+  let officialUserSections: Record<string, Record<string, unknown>> = {}
+  let officialLoaded = false
+  /** 每 namespace 独立 revision（乐观并发写校验用） */
+  const namespaceRevisions = new Map<string, number>()
+
+  function revisionOf(ns: string): number {
+    return namespaceRevisions.get(ns) ?? 0
+  }
+
+  function bumpRevision(ns: string): void {
+    namespaceRevisions.set(ns, revisionOf(ns) + 1)
+  }
+
+  function userSectionOf(ns: string): Record<string, unknown> {
+    const section = officialUserSections[ns]
+    return section !== undefined && typeof section === 'object' && section !== null
+      ? section
+      : {}
+  }
+
+  /** 启动/首次 describe 时从 chrome.storage.local 读回用户覆盖段 */
+  async function loadOfficialSettings(): Promise<void> {
+    if (officialLoaded) return
+    officialLoaded = true
+    try {
+      const stored = await chrome.storage.local.get(OFFICIAL_SETTINGS_STORAGE_KEY)
+      const raw = stored[OFFICIAL_SETTINGS_STORAGE_KEY]
+      if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+        officialUserSections = raw as Record<string, Record<string, unknown>>
+      }
+    } catch {
+      // 非扩展环境：保持空段
+    }
+  }
+
+  async function persistOfficialSettings(): Promise<void> {
+    try {
+      await chrome.storage.local.set({ [OFFICIAL_SETTINGS_STORAGE_KEY]: officialUserSections })
+    } catch {
+      // 忽略写失败（非扩展环境）
+    }
+  }
+
+  /** 按 path（首段为字段名）写入目标对象；中间段缺失时补空对象 */
+  function setAtPath(target: Record<string, unknown>, path: readonly string[], value: unknown): void {
+    if (path.length === 0) return
+    let node: Record<string, unknown> = target
+    for (let i = 0; i < path.length - 1; i++) {
+      const key = path[i] as string
+      const next = node[key]
+      node =
+        typeof next === 'object' && next !== null && !Array.isArray(next)
+          ? (next as Record<string, unknown>)
+          : (node[key] = {})
+    }
+    node[path[path.length - 1] as string] = value
+  }
+
+  /** 按 path 删除字段；中间段不存在时静默返回 */
+  function deleteAtPath(target: Record<string, unknown>, path: readonly string[]): void {
+    if (path.length === 0) return
+    let node: Record<string, unknown> = target
+    for (let i = 0; i < path.length - 1; i++) {
+      const key = path[i] as string
+      const next = node[key]
+      if (typeof next !== 'object' || next === null || Array.isArray(next)) return
+      node = next as Record<string, unknown>
+    }
+    delete node[path[path.length - 1] as string]
   }
 
   async function buildSettingsNamespaceView(): Promise<DshSettingsNamespaceView> {
@@ -611,6 +842,20 @@ export default defineBackground(() => {
     }
   }
 
+  /** 组装单个官方 namespace 的 view：value = 默认值 + user 覆盖 */
+  function buildOfficialNamespaceView(entry: DshSettingsRegistryEntry): DshSettingsNamespaceView {
+    return {
+      ns: entry.ns,
+      schema: entry.schemaJSON,
+      base: {},
+      user: { ...userSectionOf(entry.ns) },
+      value: { ...entry.defaultValue, ...userSectionOf(entry.ns) },
+      applies: 'live',
+      secrets: [],
+      revision: revisionOf(entry.ns),
+    }
+  }
+
   function dshSettingsNotExposed(ns: unknown): DshRpcResult {
     return {
       ok: false,
@@ -622,36 +867,51 @@ export default defineBackground(() => {
     }
   }
 
-  function dshSettingsConflict(expected: number, actual: number): DshRpcResult {
+  function dshSettingsConflict(ns: string, expected: number, actual: number): DshRpcResult {
     return {
       ok: false,
       error: {
         code: 'settings-conflict',
         message: 'settings revision conflict',
-        details: { ns: DSH_SETTINGS_NS, expected, actual },
+        details: { ns, expected, actual },
       },
     }
   }
 
-  /** 校验命名空间 + 可选 expectedRevision；不满足返回错误包络，满足返回 null */
+  /** 校验命名空间（官方注册表或 dsh-in-web）+ 可选 expectedRevision；不满足返回错误包络 */
   function checkSettingsWrite(payload: { ns?: unknown; expectedRevision?: unknown }): DshRpcResult | null {
-    if (payload.ns !== DSH_SETTINGS_NS) return dshSettingsNotExposed(payload.ns)
-    if (typeof payload.expectedRevision === 'number' && payload.expectedRevision !== settingsRevision) {
-      return dshSettingsConflict(payload.expectedRevision, settingsRevision)
+    const ns = String(payload.ns ?? '')
+    const exposed = ns === DSH_SETTINGS_NS || DSH_SETTINGS_REGISTRY.some((e) => e.ns === ns)
+    if (!exposed) return dshSettingsNotExposed(ns)
+    if (typeof payload.expectedRevision === 'number' && payload.expectedRevision !== revisionOf(ns)) {
+      return dshSettingsConflict(ns, payload.expectedRevision, revisionOf(ns))
     }
     return null
   }
 
   async function dshSettingsDescribe(): Promise<DshRpcResult> {
-    const view = await buildSettingsNamespaceView()
-    return { ok: true, value: { writable: true, hasDocument: false, namespaces: [view] } }
+    await loadOfficialSettings()
+    const namespaces: DshSettingsNamespaceView[] = [
+      ...DSH_SETTINGS_REGISTRY.map(buildOfficialNamespaceView),
+      await buildSettingsNamespaceView(), // dsh-in-web：llm.providers settingsNs 依赖该 namespace
+    ]
+    return { ok: true, value: { writable: true, hasDocument: false, namespaces } }
   }
 
   async function dshSettingsUpdate(payload: unknown): Promise<DshRpcResult> {
     const p = (payload ?? {}) as { ns?: unknown; patch?: unknown; expectedRevision?: unknown }
+    const ns = String(p.ns ?? '')
     const denied = checkSettingsWrite(p)
     if (denied) return denied
     const patch = (p.patch ?? {}) as Record<string, unknown>
+    const entry = DSH_SETTINGS_REGISTRY.find((e) => e.ns === ns)
+    if (entry) {
+      await loadOfficialSettings()
+      officialUserSections[ns] = { ...userSectionOf(ns), ...patch }
+      await persistOfficialSettings()
+      bumpRevision(ns)
+      return { ok: true, value: buildOfficialNamespaceView(entry) }
+    }
     if (Object.keys(patch).length > 0) {
       await patchSettings(patch as Partial<DshSettings>)
       settingsRevision += 1
@@ -661,9 +921,18 @@ export default defineBackground(() => {
 
   async function dshSettingsReplace(payload: unknown): Promise<DshRpcResult> {
     const p = (payload ?? {}) as { ns?: unknown; section?: unknown; expectedRevision?: unknown }
+    const ns = String(p.ns ?? '')
     const denied = checkSettingsWrite(p)
     if (denied) return denied
     const section = (p.section ?? {}) as Record<string, unknown>
+    const entry = DSH_SETTINGS_REGISTRY.find((e) => e.ns === ns)
+    if (entry) {
+      await loadOfficialSettings()
+      officialUserSections[ns] = { ...section }
+      await persistOfficialSettings()
+      bumpRevision(ns)
+      return { ok: true, value: buildOfficialNamespaceView(entry) }
+    }
     if (Object.keys(section).length > 0) {
       await patchSettings(section as Partial<DshSettings>)
       settingsRevision += 1
@@ -673,8 +942,28 @@ export default defineBackground(() => {
 
   async function dshSettingsMutate(payload: unknown): Promise<DshRpcResult> {
     const p = (payload ?? {}) as { ns?: unknown; ops?: unknown; expectedRevision?: unknown }
+    const ns = String(p.ns ?? '')
     const denied = checkSettingsWrite(p)
     if (denied) return denied
+    const entry = DSH_SETTINGS_REGISTRY.find((e) => e.ns === ns)
+    if (entry) {
+      await loadOfficialSettings()
+      const user = { ...userSectionOf(ns) }
+      if (Array.isArray(p.ops)) {
+        for (const op of p.ops) {
+          if (typeof op !== 'object' || op === null) continue
+          const o = op as { op?: unknown; path?: unknown; value?: unknown }
+          if (!Array.isArray(o.path) || o.path.length === 0) continue
+          const path = o.path.map(String)
+          if (o.op === 'set') setAtPath(user, path, o.value)
+          else if (o.op === 'unset') deleteAtPath(user, path)
+        }
+      }
+      officialUserSections[ns] = user
+      await persistOfficialSettings()
+      bumpRevision(ns)
+      return { ok: true, value: buildOfficialNamespaceView(entry) }
+    }
     const patch: Record<string, unknown> = {}
     if (Array.isArray(p.ops)) {
       for (const op of p.ops) {
@@ -691,6 +980,11 @@ export default defineBackground(() => {
       settingsRevision += 1
     }
     return { ok: true, value: await buildSettingsNamespaceView() }
+  }
+
+  /** settings.openDocument：扩展无文件文档（官方 host 为文件型 settings 文档时打开编辑器） */
+  function dshSettingsOpenDocument(): DshRpcResult {
+    return { ok: true, value: { opened: false, path: '' } }
   }
 
   // ── llm.*（固定模型目录）────────────────────────────────────────
@@ -847,6 +1141,7 @@ export default defineBackground(() => {
     'settings.update': dshSettingsUpdate,
     'settings.replace': dshSettingsReplace,
     'settings.mutate': dshSettingsMutate,
+    'settings.openDocument': dshSettingsOpenDocument,
     'llm.providers': dshLlmProviders,
     'llm.models': dshLlmModels,
     // agentPreset.list：Agent 预设面板启动即调用，返回官方 4 个内置预设
