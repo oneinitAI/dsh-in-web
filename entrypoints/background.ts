@@ -25,6 +25,7 @@ import { Workspace } from '@/utils/fs/workspace'
 import type { Skill } from '@/utils/skills/skill'
 import type { LlmStreamEvent } from '@/utils/plugin/host'
 import { getSettings, patchSettings, type DshSettings } from '@/utils/settings/settings'
+import { DSH_AGENT_PRESET_CONTENTS } from '@/utils/agent-presets/contents'
 
 interface PageState {
   authPresent: boolean
@@ -1063,6 +1064,69 @@ export default defineBackground(() => {
     return { ok: true, value: { presets, authorable: false, hasDocument: false } }
   }
 
+  /** agentPreset 错误包络：details 携带 agentPreset id（对齐 rpcErrorSchema 分支） */
+  function dshAgentPresetError(
+    id: string,
+    code: 'agent-preset-not-found' | 'agent-preset-read-only',
+    message: string,
+  ): DshRpcResult {
+    return { ok: false, error: { code, message, details: { agentPreset: id } } }
+  }
+
+  function findAgentPreset(id: string): { id: string; name: string; description: string } | null {
+    const preset = DSH_AGENT_PRESETS.find((p) => p.id === id)
+    return preset ?? null
+  }
+
+  /**
+   * agentPreset.read：返回预设完整 composition（官方 agent.cordis.yml 内容，从 harness
+   * 逐字节读入硬编码于 @/utils/agent-presets/contents）。trust=system（官方内置）。
+   */
+  function dshAgentPresetRead(payload: unknown): DshRpcResult {
+    const p = (payload ?? {}) as { agentPreset?: unknown }
+    const id = typeof p.agentPreset === 'string' && p.agentPreset ? p.agentPreset : ''
+    const preset = findAgentPreset(id)
+    if (!preset) return dshAgentPresetError(id, 'agent-preset-not-found', `agent preset not found: ${id}`)
+    const content = DSH_AGENT_PRESET_CONTENTS[id]
+    return {
+      ok: true,
+      value: {
+        agentPreset: preset.id,
+        trust: 'system',
+        content: content ?? '',
+        name: preset.name,
+        description: preset.description,
+      },
+    }
+  }
+
+  /** agentPreset.select：校验预设存在后返回选中 id（本扩展无真实会话挂载，确认存在即成功） */
+  function dshAgentPresetSelect(payload: unknown): DshRpcResult {
+    const p = (payload ?? {}) as { agentPreset?: unknown }
+    const id = typeof p.agentPreset === 'string' && p.agentPreset ? p.agentPreset : ''
+    if (!findAgentPreset(id)) return dshAgentPresetError(id, 'agent-preset-not-found', `agent preset not found: ${id}`)
+    return { ok: true, value: { agentPreset: id } }
+  }
+
+  /** agentPreset.copy：复制预设（本扩展无本地文件系统，返回目标 id 即可，客户端据此更新列表） */
+  function dshAgentPresetCopy(payload: unknown): DshRpcResult {
+    const p = (payload ?? {}) as { agentPreset?: unknown }
+    const id = typeof p.agentPreset === 'string' && p.agentPreset ? p.agentPreset : ''
+    return { ok: true, value: { agentPreset: id } }
+  }
+
+  /** agentPreset.openDocument：本扩展无文件型预设文档（官方 host 打开 composition 文件） */
+  function dshAgentPresetOpenDocument(payload: unknown): DshRpcResult {
+    return { ok: true, value: { opened: false, path: '' } }
+  }
+
+  /** agentPreset.remove：官方内置预设（system trust）不可删除，返回只读错误 */
+  function dshAgentPresetRemove(payload: unknown): DshRpcResult {
+    const p = (payload ?? {}) as { agentPreset?: unknown }
+    const id = typeof p.agentPreset === 'string' && p.agentPreset ? p.agentPreset : ''
+    return dshAgentPresetError(id, 'agent-preset-read-only', 'system preset cannot be removed')
+  }
+
   // ── pluginInventory.*（boot-manifest 内置插件清单）─────────────────────
   interface DshPluginInventoryEntry {
     entryId: string
@@ -1147,6 +1211,14 @@ export default defineBackground(() => {
     // agentPreset.list：Agent 预设面板启动即调用，返回官方 4 个内置预设
     // （standard/code/minimal/cordis，元数据与 harness preset.yml 一致）
     'agentPreset.list': dshAgentPresetList,
+    // agentPreset.read/select/copy/openDocument/remove：预设详情/选择/复制/文档/删除。
+    // read 返回官方 agent.cordis.yml 完整内容（@/utils/agent-presets/contents 硬编码），
+    // select 校验存在性，copy/openDocument 为虚拟操作，remove 对 system 预设返回只读错误。
+    'agentPreset.read': dshAgentPresetRead,
+    'agentPreset.select': dshAgentPresetSelect,
+    'agentPreset.copy': dshAgentPresetCopy,
+    'agentPreset.openDocument': dshAgentPresetOpenDocument,
+    'agentPreset.remove': dshAgentPresetRemove,
     // credentials.describe / subagent.list：对应面板启动即调用，返回空数据
     'credentials.describe': () => ({ ok: true, value: { credentials: {} } }),
     'subagent.list': () => ({ ok: true, value: { entries: [], parentAvailable: true } }),

@@ -86,9 +86,10 @@ window.__dshDebug = {
       'session.list', 'session.models', 'session.create',
       'workspace.list', 'skill.list',
       'settings.describe', 'llm.providers', 'llm.models',
-      'agentPreset.list', 'credentials.describe', 'subagent.list',
+      'agentPreset.list', 'agentPreset.read', 'credentials.describe', 'subagent.list',
       'dynamicCordisRunner/inventory', 'dynamicCordisRunner/syncInspectManifest',
     ]
+    let settingsDescribeValue = null
     for (const method of rpcMethods) {
       const body = method === 'session.create'
         ? { type: 'client-request', rpcId: 'diag-1', method, payload: { title: 'diag' } }
@@ -98,11 +99,29 @@ window.__dshDebug = {
         const r = reply?.body?.result
         if (r?.ok === true) {
           out('ok', method + ' → ok: ' + JSON.stringify(r.value).slice(0, 180))
+          if (method === 'settings.describe') settingsDescribeValue = r.value
         } else {
           out('bad', method + ' → ERROR: ' + JSON.stringify(r?.error).slice(0, 160))
         }
       } catch (e) {
         out('bad', method + ' → THREW: ' + e.message)
+      }
+    }
+    // settings.describe 特判：展开每个 namespace 的 value，直接展示 9 个官方 namespace
+    // 的真实配置（如 ui-theme: preference=system），证明 settings 配置真的返回。
+    const sNamespaces = settingsDescribeValue && Array.isArray(settingsDescribeValue.namespaces)
+      ? settingsDescribeValue.namespaces
+      : []
+    for (const ns of sNamespaces) {
+      if (!ns || typeof ns.ns !== 'string') continue
+      const v = ns.value
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const pairs = Object.keys(v)
+          .filter((k) => v[k] !== undefined)
+          .map((k) => k + '=' + JSON.stringify(v[k]))
+        out('info', 'settings[' + ns.ns + ']: ' + (pairs.length ? pairs.join(', ') : '(empty)'))
+      } else {
+        out('info', 'settings[' + ns.ns + ']: ' + JSON.stringify(v))
       }
     }
     out('info', '[5] RPC 探测完成')
