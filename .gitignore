@@ -1,0 +1,8 @@
+node_modules/
+.output/
+.wxt/
+.codegraph/
+*.log
+.DS_Store
+.omo/evidence/
+.omo/run-continuation
