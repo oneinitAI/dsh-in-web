@@ -89,3 +89,43 @@ export const CMD_SEND_MESSAGE = 'send-message'
 export const CMD_STOP_STREAM = 'stop-stream'
 export const CMD_READ_TOKEN = 'read-token'
 export const CMD_OPEN_PANEL = 'open-panel'
+
+// ── chat-stream：SW ↔ content script 的 LLM 流式桥（Wave 1.5 起使用）────────
+// content script（isolated world）持有 DeepSeekWebClient —— 其 fetch 以页面
+// origin 发出，Origin/Referer/Cookie 天然正确（SW 的 fetch 无法伪造这些头）。
+
+/** SW → content script：发起一次流式聊天 */
+export const EXT_TOPIC_CHAT_STREAM_START = 'chat-stream-start'
+export interface ChatStreamStartPayload {
+  requestId: string
+  messages: { role: 'system' | 'user' | 'assistant' | 'tool'; content: string }[]
+  reasoning?: boolean
+  /** 复用已有会话；缺省由 content script 自动创建 */
+  chatSessionId?: string
+}
+
+/** content script → SW：流式事件（thinking/text），与 requestId 关联 */
+export const EXT_TOPIC_CHAT_STREAM_EVENT = 'chat-stream-event'
+export interface ChatStreamEventPayload {
+  requestId: string
+  event: { kind: 'thinking' | 'text'; text: string }
+}
+
+/** content script → SW：流结束（finish 或 abort） */
+export const EXT_TOPIC_CHAT_STREAM_DONE = 'chat-stream-done'
+export interface ChatStreamDonePayload {
+  requestId: string
+}
+
+/** content script → SW：流失败 */
+export const EXT_TOPIC_CHAT_STREAM_ERROR = 'chat-stream-error'
+export interface ChatStreamErrorPayload {
+  requestId: string
+  error: string
+}
+
+/** SW → content script：中止指定流 */
+export const EXT_TOPIC_CHAT_STREAM_STOP = 'chat-stream-stop'
+export interface ChatStreamStopPayload {
+  requestId: string
+}
