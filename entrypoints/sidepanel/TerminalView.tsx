@@ -24,6 +24,7 @@ export function TerminalView() {
       convertEol: true,
       fontSize: 12,
       fontFamily: 'Consolas, "Courier New", monospace',
+      // 终端固定深色主题（不随面板 data-theme）—— 终端惯例，且与 .terminal 容器 CSS 一致
       theme: { background: '#16181d', foreground: '#e6e8eb', cursor: '#2b6cb0' },
       scrollback: 1000,
     })

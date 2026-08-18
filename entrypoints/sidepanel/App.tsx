@@ -84,6 +84,14 @@ export function App() {
     void getSettings().then(setSettings)
   }, [])
 
+  // 应用主题（dark/light）与字号到 documentElement —— CSS 变量驱动，见 style.css :root
+  useEffect(() => {
+    if (!settings) return
+    const root = document.documentElement
+    root.dataset.theme = settings.darkTheme ? 'dark' : 'light'
+    root.style.setProperty('--dsh-font-size', `${settings.fontSize}px`)
+  }, [settings])
+
   async function toggleSetting<K extends keyof DshSettings>(key: K, value: DshSettings[K]) {
     const next = await patchSettings({ [key]: value })
     setSettings(next)
