@@ -742,6 +742,8 @@ export default defineBackground(() => {
 
   interface VirtualSessionRecord {
     agentPreset?: string
+    /** 所属工作区 path（session.create 携带 workspaceId 时写入；session.list 的 cwd 字段） */
+    cwd?: string
     blank: boolean
     createdAt: number
     /** 最后活动时间（session.list 的 updatedAt） */
@@ -758,10 +760,11 @@ export default defineBackground(() => {
 
   const virtualSessions = new Map<string, VirtualSessionRecord>()
 
-  function newVirtualSession(agentPreset?: string): VirtualSessionRecord {
+  function newVirtualSession(agentPreset?: string, cwd?: string): VirtualSessionRecord {
     const now = Date.now()
     return {
       ...(agentPreset !== undefined ? { agentPreset } : {}),
+      ...(cwd !== undefined ? { cwd } : {}),
       blank: true,
       createdAt: now,
       updatedAt: now,
@@ -896,12 +899,45 @@ export default defineBackground(() => {
   type DshRpcHandler = (payload: unknown) => DshRpcResult | Promise<DshRpcResult>
 
   // ── session.* ────────────────────────────────────────────────
-  function dshSessionCreate(payload: unknown): DshRpcResult {
-    const p = (payload ?? {}) as { sessionId?: unknown; agentPreset?: unknown }
+  /**
+   * 把会话关联到指定工作区：cwd = workspace.path，sessionId 并入
+   * workspace.sessionIds 并持久化（dsh-workspaces）。「网页对话」工作区
+   * （DSH_WORKSPACE_ID）不在 storage 时（默认/首次场景）补一条记录再关联；
+   * 其余 workspaceId 找不到记录则返回 undefined（不关联，会话保持游离）。
+   * 返回关联后的 cwd（即工作区 path），供调用方写入 VirtualSessionRecord。
+   */
+  async function linkSessionToWorkspace(
+    sessionId: string,
+    workspaceId: string,
+  ): Promise<string | undefined> {
+    const records = await readWorkspaces()
+    const existing = records.find((r) => r.workspaceId === workspaceId)
+    const ws: DshWorkspaceRecord | undefined =
+      existing ?? (workspaceId === DSH_WORKSPACE_ID ? await thisWebChatWorkspace() : undefined)
+    if (!ws) return undefined
+    const sessionIds = ws.sessionIds.includes(sessionId)
+      ? ws.sessionIds
+      : [...ws.sessionIds, sessionId]
+    if (sessionIds.length !== ws.sessionIds.length) {
+      const next: DshWorkspaceRecord = { ...ws, sessionIds, updatedAt: new Date().toISOString() }
+      const base = existing !== undefined ? records : [...records, ws]
+      await writeWorkspaces(base.map((r) => (r.workspaceId === ws.workspaceId ? next : r)))
+    }
+    return ws.path
+  }
+
+  async function dshSessionCreate(payload: unknown): Promise<DshRpcResult> {
+    const p = (payload ?? {}) as { sessionId?: unknown; agentPreset?: unknown; workspaceId?: unknown }
     const sessionId = typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : mintVirtualSessionId()
     // sessionCreateRequestSchema 的 agentPreset 可选：透传回 value（undefined 时省略，schema optional）
     const agentPreset = typeof p.agentPreset === 'string' && p.agentPreset ? p.agentPreset : undefined
-    virtualSessions.set(sessionId, newVirtualSession(agentPreset))
+    // sessionCreateRequestSchema 的 workspaceId：显式有效 → 关联该工作区
+    // （cwd=workspace.path + sessionId 并入 sessionIds，让 connectWorkspace 复用命中）；
+    // 无效/找不到 → 不关联（cwd undefined）但创建仍成功；
+    // 未携带 → 默认关联「网页对话」工作区（新会话默认挂在它下面，网页对话才有内容）。
+    const workspaceId = typeof p.workspaceId === 'string' && p.workspaceId ? p.workspaceId : DSH_WORKSPACE_ID
+    const cwd = await linkSessionToWorkspace(sessionId, workspaceId)
+    virtualSessions.set(sessionId, newVirtualSession(agentPreset, cwd))
     // host 流：会话创建即推 host/session-added（blank 恒为 true，客户端在首个 running 翻转）
     broadcastHostFrame({ type: 'host/session-added', sessionId, blank: true, ...(agentPreset !== undefined ? { agentPreset } : {}) })
     return {
@@ -913,19 +949,20 @@ export default defineBackground(() => {
     }
   }
 
-  /** session.list：读回虚拟会话注册表，映射 sessionSummarySchema 形状 */
+  /** session.list：读回虚拟会话注册表，映射 sessionSummarySchema 形状（含 cwd） */
   function dshSessionList(): DshRpcResult {
     const items = [...virtualSessions.entries()].map(([sessionId, rec]) => ({
       sessionId,
       updatedAt: rec.updatedAt,
       running: rec.running,
       blank: rec.blank,
+      ...(rec.cwd !== undefined ? { cwd: rec.cwd } : {}),
       ...(rec.agentPreset !== undefined ? { agentPreset: rec.agentPreset } : {}),
     }))
     return { ok: true, value: { items } }
   }
 
-  function dshSessionPrompt(payload: unknown): DshRpcResult {
+  async function dshSessionPrompt(payload: unknown): Promise<DshRpcResult> {
     const p = (payload ?? {}) as { sessionId?: unknown; content?: unknown }
     const text = extractPromptText(p.content)
     if (!text) {
@@ -939,6 +976,12 @@ export default defineBackground(() => {
     if (!rec) {
       rec = newVirtualSession()
       virtualSessions.set(sessionId, rec)
+    }
+    // 兜底关联：会话尚未关联任何工作区（历史遗留 / 未带 workspaceId 创建）时，
+    // 挂到「网页对话」工作区，保证网页对话能看到对话内容。
+    if (rec.cwd === undefined) {
+      const cwd = await linkSessionToWorkspace(sessionId, DSH_WORKSPACE_ID)
+      if (cwd !== undefined) rec.cwd = cwd
     }
     if (rec.running) {
       // 已有流在跑：拒绝并发 prompt（UI 运行中禁用输入，仅防御）
