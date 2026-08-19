@@ -304,7 +304,7 @@ export default defineBackground(() => {
   }
 
   /** 流式聊天编排 —— agent loop 驱动（多轮工具调用回填） */
-  async function runStream(messages: Message[], reasoning: boolean, search: boolean, sink?: StreamSink) {
+  async function runStream(messages: Message[], reasoning: boolean, search: boolean, sink?: StreamSink, preset?: string) {
     currentReasoning = reasoning
     currentSearch = search
     currentPersistSession = (await getSettings()).persistSession
@@ -320,7 +320,7 @@ export default defineBackground(() => {
     }
 
     try {
-      const tools = buildAgentTools(ws, skills)
+      const tools = buildAgentTools(ws, skills, preset)
       // 统一 persona 注入：任何入口（dsh 会话 / side panel 原生聊天）进入
       // runStream 时，若无 system 前缀则注入默认 persona；dsh 会话路径
       // （session.prompt）已按 agentPreset 注入 system，此处跳过避免重复。
@@ -1247,7 +1247,7 @@ export default defineBackground(() => {
         })
         finishRunning()
       },
-    })
+    }, rec.agentPreset)
     return { ok: true, value: { accepted: true } }
   }
 

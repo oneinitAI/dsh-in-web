@@ -25,11 +25,24 @@ interface PresetMeta {
   name: string
   /** 预设能力一句话说明（注入 system 的增强句，与 preset.yml description 同源） */
   capability: string
-  /** 工具可用性提示（可选） */
-  toolsHint: string
+  /** 该预设的完整工具清单（name + 功能说明），注入 system 提示词 */
+  tools: ReadonlyArray<{ name: string; description: string }>
   /** 从 agent.cordis.yml 提取 persona 失败时的兜底 persona */
   fallbackPersona: string
 }
+
+/** 工具名与功能说明（来自官方 agent.cordis.yml 的 tool 段，浏览器可执行/可表述者列出） */
+const TOOL_BASH = { name: 'bash', description: 'Execute shell commands in a persistent bash shell' }
+const TOOL_PWSH = { name: 'pwsh', description: 'Execute commands in a Windows PowerShell shell' }
+const TOOL_FS = { name: 'read_file/write_file/edit_file', description: 'Read, write, and edit files in the workspace' }
+const TOOL_FS_SEARCH = { name: 'fs_search', description: 'Search file contents and list directory trees' }
+const TOOL_WEB = { name: 'web_search', description: 'Search the web for current information' }
+const TOOL_SKILL = { name: 'skill', description: 'Invoke a loaded SKILL.md skill by name' }
+const TOOL_TODO = { name: 'todo_write', description: 'Track implementation tasks as a todo list' }
+const TOOL_GOAL = { name: 'goal', description: 'Create and track long-running goals' }
+const TOOL_PLAN = { name: 'exit_plan_mode', description: 'Submit a decision-complete plan for approval' }
+const TOOL_STR_EDITOR = { name: 'str_replace_editor', description: 'Apply targeted string-replace edits to files' }
+const TOOL_CORDIS = { name: 'cordis', description: 'Read and modify the harness composition (agent presets, plugin rows)' }
 
 /** 与 background 的 DSH_AGENT_PRESETS（官方 preset.yml 元数据）保持一致 */
 const PRESET_META: ReadonlyArray<PresetMeta> = [
@@ -37,28 +50,37 @@ const PRESET_META: ReadonlyArray<PresetMeta> = [
     id: 'standard',
     name: '标准模式',
     capability: '功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。',
-    toolsHint: 'Available tools: file editing, shell, file & web search, skills, planning, goals, subagents, and workflows.',
+    tools: [
+      TOOL_BASH, TOOL_PWSH, TOOL_FS, TOOL_FS_SEARCH, TOOL_WEB,
+      TOOL_SKILL, TOOL_TODO, TOOL_GOAL, TOOL_PLAN,
+    ],
     fallbackPersona: 'You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.',
   },
   {
     id: 'code',
     name: 'PTC 模式',
     capability: '具备标准模式的全部能力，并通过 Code Mode SDK 呈现工具，让模型用一个 TypeScript 程序组合多步操作。',
-    toolsHint: 'Tools are presented through a Code Mode SDK: write a TypeScript program to compose multi-step operations, then run it.',
+    tools: [
+      TOOL_BASH, TOOL_PWSH, TOOL_FS, TOOL_FS_SEARCH, TOOL_WEB,
+      TOOL_SKILL, TOOL_TODO, TOOL_GOAL, TOOL_PLAN,
+    ],
     fallbackPersona: 'You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.',
   },
   {
     id: 'minimal',
     name: '极简模式',
     capability: '仅提供持久 bash 与 str_replace_editor 两个工具的最小编码 Agent。',
-    toolsHint: 'Available tools: persistent bash shell and str_replace_editor.',
+    tools: [TOOL_BASH, TOOL_STR_EDITOR],
     fallbackPersona: 'You are a helpful software engineer assistant.',
   },
   {
     id: 'cordis',
     name: '创造模式',
     capability: '具备标准模式的全部能力，并可读取和修改当前 harness 运行时（Cordis composition），用于创建自定义 Agent preset。',
-    toolsHint: 'You can read and modify the harness you run on via the Cordis toolset.',
+    tools: [
+      TOOL_BASH, TOOL_PWSH, TOOL_FS, TOOL_FS_SEARCH, TOOL_WEB,
+      TOOL_SKILL, TOOL_TODO, TOOL_GOAL, TOOL_PLAN, TOOL_CORDIS,
+    ],
     fallbackPersona:
       'You are a coding agent powered by the {{model}} model, running on the DeepSeek Harness. Your working directory is {{cwd}}.',
   },
@@ -130,7 +152,13 @@ export function presetSystemPrompt(agentPreset: string | undefined, ctx: PresetP
   const cwd = ctx.cwd?.trim() || '网页对话'
   const resolved = persona.replaceAll('{{model}}', model).replaceAll('{{cwd}}', cwd)
 
-  return [`You are using the "${meta.name}" agent preset: ${meta.capability}`, meta.toolsHint, resolved]
-    .filter((part) => part.trim() !== '')
-    .join('\n\n')
+  // 完整工具清单：`name — description` 逐行列出（agent 据此知道可用工具与调用格式）
+  const toolList = meta.tools.map((t) => `- ${t.name}: ${t.description}`).join('\n')
+
+  return [
+    `You are using the "${meta.name}" agent preset: ${meta.capability}`,
+    'You are an agent that can call tools. To use a tool, emit it inline with the tool name, arguments, and then read the result before continuing.',
+    `Available tools:\n${toolList}`,
+    resolved,
+  ].filter((part) => part.trim() !== '').join('\n\n')
 }

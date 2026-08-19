@@ -84,9 +84,43 @@ export function buildSkillTool(skill: Skill): ToolDef {
   }
 }
 
-/** Build the full tool registry for the agent loop. */
-export function buildAgentTools(ws: Workspace, skills: Skill[]): ToolRegistry {
+/** Build a simple web search tool (browser-safe fetch). */
+function buildWebSearchTool(): ToolDef {
+  return {
+    description: '搜索网页获取实时信息。参数：query（搜索词）',
+    async run(args: Record<string, unknown>): Promise<{ ok: boolean; output?: string; error?: string }> {
+      const query = String(args.query ?? '').trim()
+      if (!query) return { ok: false, error: 'missing query' }
+      try {
+        const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`
+        const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } })
+        const html = await res.text()
+        // 粗提取文本（去标签）——浏览器扩展里无法跑搜索引擎 SDK，给近似结果
+        const text = html
+          .replace(/<script[\s\S]*?<\/script>/gi, '')
+          .replace(/<style[\s\S]*?<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 3000)
+        return { ok: true, output: text || '(no results)' }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    },
+  }
+}
+
+/** Build the full tool registry for the agent loop, optionally scoped to a preset. */
+export function buildAgentTools(ws: Workspace, skills: Skill[], preset?: string): ToolRegistry {
   const tools: ToolRegistry = { ...buildFsTools(ws) }
+  // 预设区分：minimal 仅精简文件编辑；其余（standard/code/cordis）含 web 搜索 + skill。
+  if (preset === 'minimal') {
+    // 极简：只保留文件编辑工具（str_replace_editor 语义 ≈ edit_file）
+    for (const skill of skills) tools[`skill_${skill.name}`] = buildSkillTool(skill)
+    return tools
+  }
+  tools.web_search = buildWebSearchTool()
   for (const skill of skills) {
     tools[`skill_${skill.name}`] = buildSkillTool(skill)
   }
