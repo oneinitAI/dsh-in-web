@@ -100,6 +100,22 @@ node scripts/build-connection-bridge.mjs   # 重新构建自定义 connection br
 node scripts/build-official-settings.mjs   # 构建官方 settings runtime（pnpm build 内自动执行）
 ```
 
+### 添加用户插件（构建期合并）
+
+MV3 打包扩展的 extension_pages CSP 被 Chrome 锁定为最小 `script-src 'self'`
+（blob:/data:/unsafe-eval 一律被拒），运行时动态注入插件不可行。因此用户插件
+在**构建期**合并进扩展包：
+
+1. 把 dsh client 插件 bundle（`window.__ModuleLoader__.load({ id, factory })` 格式，
+   如 [`dsh-settings-plus`](https://github.com/oneinitAI/dsh-settings-plus) 的
+   `lib/client.js`）放入仓库根 `user-plugins/<id>.js`（scoped 包可建子目录）；
+2. 运行 `node scripts/import-dsh.mjs && pnpm build`；
+3. chrome://extensions 重新加载扩展。
+
+`import-dsh` 会把 bundle 复制为 `dsh-web/user-plugins/<id>.js`、追加进
+`__DSH_BOOT__.entries`（与官方 client bundle 同走 `'self'` 相对路径加载），并生成
+`dsh-web/user-plugins.json` 清单。Side Panel「插件」页可校验 bundle 格式并查看已内置列表。
+
 ### 手动加载
 
 1. `pnpm build`

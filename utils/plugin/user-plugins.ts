@@ -1,27 +1,32 @@
 /**
- * 用户插件管理 —— side panel「插件」页的数据层。
+ * 用户插件 —— side panel「插件」页的数据层。
  *
- * 「插件」页让用户粘贴/选择 dsh client 插件 bundle（格式与官方 client.js 相同：
- * `window.__ModuleLoader__.load({ id, factory })`，如 @oneinitai/dsh-settings-plus
- * 的 lib/client.js）。插件存两份：
- *  - chrome.storage.local（key: dsh-user-plugins）—— 权威持久层；
- *  - localStorage（同 key）—— dsh iframe 与 side panel 同源（chrome-extension://），
- *    dsh-web/user-plugins.js 在 boot 前同步读它把插件追加进 __DSH_BOOT__.entries。
+ * MV3 打包扩展的 extension_pages CSP 被 Chrome 锁定为最小 `script-src 'self'`，
+ * blob:/data:/unsafe-eval 一律被拒（manifest 校验即失败），运行时动态注入用户
+ * 代码不可行。因此用户插件改为**构建期合并**：
  *
- * 双写保持一致；读时 chrome.storage 优先，localStorage 仅作回退。
- * 纯函数（extractPluginId / isPluginBundle / buildUserPluginEntry）与存储分离，可单测。
+ *   仓库根 user-plugins/<bundle>.js
+ *     └─ import-dsh.mjs 扫描 → 复制为 dsh-web/user-plugins/<id>.js（扩展包内静态文件）
+ *          └─ 追加进 __DSH_BOOT__.entries（url: ./user-plugins/<id>.js?rev=…，
+ *             与官方 client bundle 同走 'self' 相对路径）
+ *               └─ 生成 dsh-web/user-plugins.json 清单（本模块读取展示）
+ *
+ * 添加插件 = 把官方同格式的 bundle（window.__ModuleLoader__.load({ id, factory })，
+ * 如 @oneinitai/dsh-settings-plus 的 lib/client.js）放入 user-plugins/ 目录，
+ * 重新运行 `pnpm exec import-dsh` + `pnpm build` 并重新加载扩展后生效。
+ * 本模块只负责：校验 bundle 格式 / 提取插件 id / 解析内置清单。
  */
 
-export interface UserPlugin {
-  /** 插件 id，如 '@oneinitai/dsh-settings-plus'（与 bundle 内 id 一致） */
+export interface UserPluginInfo {
+  /** 插件 id，如 '@oneinitai/dsh-settings-plus' */
   id: string
-  /** bundle 源码（完整的 `window.__ModuleLoader__.load({...})` 脚本） */
-  code: string
-  /** 添加时间（ms 时间戳） */
-  addedAt: number
+  /** 扩展包内相对路径，如 user-plugins/@oneinitai/dsh-settings-plus.js */
+  file: string
+  /** 内容 hash（前 8 位） */
+  rev: string
+  /** 来源文件名（仓库 user-plugins/ 下的原始文件名） */
+  source: string
 }
-
-export const USER_PLUGINS_KEY = 'dsh-user-plugins'
 
 /** 从 bundle 源码提取插件 id（load({ id: '...' }) 或双引号） */
 export function extractPluginId(code: string): string | null {
@@ -38,95 +43,43 @@ export function isPluginBundle(code: string): boolean {
   return extractPluginId(code) !== null
 }
 
-/**
- * 把一个用户插件构建成追加到 __DSH_BOOT__.entries 的 entry 行。
- * url 由调用方注入（真实环境用 URL.createObjectURL(new Blob([code]))；测试注入假实现）。
- * @param plugin - 用户插件。
- * @param createUrl - code → blob/data URL 的转换函数。
- * @returns entry 行；id 非法或 createUrl 失败时返回 null。
- */
-export function buildUserPluginEntry(
-  plugin: UserPlugin,
-  createUrl: (code: string) => string,
-): { id: string; url: string; rev: string; immediately: boolean } | null {
-  if (!plugin || typeof plugin.id !== 'string' || typeof plugin.code !== 'string') return null
-  if (plugin.id.trim() === '' || plugin.code.trim() === '') return null
-  let url: string
+/** 解析 user-plugins.json 清单文本（纯函数，便于测试） */
+export function parseUserPluginsManifest(text: string): UserPluginInfo[] {
   try {
-    url = createUrl(plugin.code)
-  } catch {
-    return null
-  }
-  if (!url) return null
-  // rev 用字符串即可（parseBootManifest 只要求 string）；immediately=false 走普通 arrival。
-  return { id: plugin.id, url, rev: 'user', immediately: false }
-}
-
-/** 从 chrome.storage / localStorage 读取已安装插件（返回新数组，未安装返回 []） */
-export async function readUserPlugins(): Promise<UserPlugin[]> {
-  try {
-    const stored = await chrome.storage.local.get(USER_PLUGINS_KEY)
-    const list = stored[USER_PLUGINS_KEY]
-    if (Array.isArray(list)) {
-      const valid = list.filter(isUserPlugin)
-      // 回填 localStorage（dsh iframe 同步读取依赖它；首装时可能缺失）
-      try {
-        localStorage.setItem(USER_PLUGINS_KEY, JSON.stringify(valid))
-      } catch {
-        // 非扩展环境忽略
-      }
-      return valid
-    }
-  } catch {
-    // chrome.storage 不可用（测试环境）→ 回落 localStorage
-  }
-  try {
-    const raw = localStorage.getItem(USER_PLUGINS_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as unknown
-    return Array.isArray(parsed) ? parsed.filter(isUserPlugin) : []
+    const parsed = JSON.parse(text) as { plugins?: unknown }
+    if (!parsed || !Array.isArray(parsed.plugins)) return []
+    return parsed.plugins
+      .filter(isUserPluginInfo)
+      .sort((a, b) => a.id.localeCompare(b.id))
   } catch {
     return []
   }
 }
 
-/** 双写持久化（chrome.storage 权威 + localStorage 镜像）；返回是否成功 */
-export async function writeUserPlugins(plugins: UserPlugin[]): Promise<boolean> {
-  const clean = plugins.filter(isUserPlugin)
-  let ok = false
+/**
+ * 读取扩展包内 user-plugins.json（由 import-dsh.mjs 生成），返回已内置的用户插件。
+ * 旧产物（未重新构建）返回 []。
+ */
+export async function listBuiltInUserPlugins(): Promise<UserPluginInfo[]> {
   try {
-    await chrome.storage.local.set({ [USER_PLUGINS_KEY]: clean })
-    ok = true
+    const url = chrome.runtime.getURL('dsh-web/user-plugins.json')
+    const res = await fetch(url)
+    if (!res.ok) return []
+    const text = await res.text()
+    return parseUserPluginsManifest(text)
   } catch {
-    // 非扩展环境
+    return []
   }
-  try {
-    localStorage.setItem(USER_PLUGINS_KEY, JSON.stringify(clean))
-  } catch {
-    // 忽略（无 localStorage 环境）
-  }
-  return ok
 }
 
-/** 添加插件（按 id 去重，覆盖旧版本）；返回最终列表 */
-export async function addUserPlugin(id: string, code: string, now = Date.now()): Promise<UserPlugin[]> {
-  const existing = await readUserPlugins()
-  const next = [...existing.filter((p) => p.id !== id), { id, code, addedAt: now }]
-  await writeUserPlugins(next)
-  return next
-}
-
-/** 移除插件；返回最终列表 */
-export async function removeUserPlugin(id: string): Promise<UserPlugin[]> {
-  const existing = await readUserPlugins()
-  const next = existing.filter((p) => p.id !== id)
-  await writeUserPlugins(next)
-  return next
-}
-
-/** 类型守卫：UserPlugin 字段形状校验 */
-function isUserPlugin(value: unknown): value is UserPlugin {
+/** 类型守卫：UserPluginInfo 字段形状校验 */
+function isUserPluginInfo(value: unknown): value is UserPluginInfo {
   if (typeof value !== 'object' || value === null) return false
   const o = value as Record<string, unknown>
-  return typeof o.id === 'string' && typeof o.code === 'string'
+  return (
+    typeof o.id === 'string' &&
+    typeof o.file === 'string' &&
+    typeof o.rev === 'string' &&
+    typeof o.source === 'string'
+  )
 }

@@ -15,11 +15,10 @@ export default defineConfig({
       'unlimitedStorage',
     ],
     host_permissions: ['https://chat.deepseek.com/*', '<all_urls>'],
-    // 放行 blob: script —— 「插件」页添加的用户插件 bundle 由 dsh-web 内的
-    // user-plugins.js 转成 blob URL 追加进 boot manifest 后经 <script src> 加载。
-    content_security_policy: {
-      extension_pages: "script-src 'self' blob:; object-src 'self';",
-    },
+    // MV3 打包扩展的 extension_pages CSP 被 Chrome 强制锁定为最小
+    // `script-src 'self'`：blob:/data:/unsafe-eval 一律被拒绝（manifest 校验即失败）。
+    // 因此用户插件不能运行时注入，改为 import-dsh.mjs 构建期合并为扩展包内静态文件
+    // （dsh-web/user-plugins/<id>.js），与官方 client bundle 同走 'self' 加载路径。
     web_accessible_resources: [
       {
         // 允许页面 iframe 加载 dsh 面板（dsh-ui.content.ts 注入）。

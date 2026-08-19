@@ -1198,6 +1198,31 @@ body {
   font-family: var(--ds-font-family-code);
 }
 
+.plugins__steps {
+  margin: 0 0 4px 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: calc(var(--dsh-font-size) - 2px);
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.plugins__steps code {
+  font-family: var(--ds-font-family-code);
+  color: var(--dsw-alias-state-business-primary);
+  word-break: break-all;
+}
+
+.plugins__list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: calc(var(--dsh-font-size) - 1px);
+  color: var(--dsw-alias-label-secondary);
+}
+
 .plugins__list {
   display: flex;
   flex-direction: column;

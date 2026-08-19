@@ -9,12 +9,10 @@ import { parseSkillMd, type Skill } from '@/utils/skills/skill'
 import { interpolate, parseSections, renderSections, type PromptSection } from '@/utils/prompts/prompt'
 import { getSettings, patchSettings, type DshSettings } from '@/utils/settings/settings'
 import {
-  addUserPlugin,
   extractPluginId,
   isPluginBundle,
-  readUserPlugins,
-  removeUserPlugin,
-  type UserPlugin,
+  listBuiltInUserPlugins,
+  type UserPluginInfo,
 } from '@/utils/plugin/user-plugins'
 import { TerminalView } from './TerminalView'
 
@@ -105,8 +103,8 @@ export function App() {
   // ── 设置（持久化）────────────────────────
   const [settings, setSettings] = useState<DshSettings | null>(null)
 
-  // ── 用户插件管理 ────────────────────────
-  const [userPlugins, setUserPlugins] = useState<UserPlugin[]>([])
+  // ── 用户插件（构建期合并，CSP-safe）───────────
+  const [builtInPlugins, setBuiltInPlugins] = useState<UserPluginInfo[]>([])
   const [pluginSrc, setPluginSrc] = useState('')
   const [pluginName, setPluginName] = useState('')
   const [pluginMsg, setPluginMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
@@ -245,10 +243,10 @@ export function App() {
     })
   }, [tab])
 
-  // 进入插件标签时拉取已安装的用户插件
+  // 进入插件标签时拉取已内置的用户插件清单（import-dsh 生成）
   useEffect(() => {
     if (tab !== 'plugins') return
-    void readUserPlugins().then(setUserPlugins)
+    void listBuiltInUserPlugins().then(setBuiltInPlugins)
   }, [tab])
 
   // 提示词实时渲染
@@ -308,7 +306,10 @@ export function App() {
     setPluginMsg(null)
   }
 
-  /** 添加插件：校验 bundle 格式后持久化（localStorage + chrome.storage 双写） */
+  /**
+   * 校验粘贴/选择的 bundle 格式，并给出「保存到 user-plugins/ 后重建」的引导。
+   * MV3 扩展页 CSP 禁 blob/data/eval，插件必须在构建期合并进扩展包内。
+   */
   async function addPlugin() {
     const code = pluginSrc.trim()
     if (!code) {
@@ -325,17 +326,16 @@ export function App() {
       return
     }
     setPluginName(id)
-    const next = await addUserPlugin(id, code)
-    setUserPlugins(next)
     setPluginSrc('')
-    setPluginMsg({ kind: 'ok', text: `已添加 ${id} —— 重新加载 dsh 页面（刷新 chat.deepseek.com 或重开 dsh 模式）后生效` })
+    setPluginMsg({
+      kind: 'ok',
+      text: `校验通过：插件 ${id}。请将当前 bundle 保存为仓库 user-plugins/${id}.js，然后运行 pnpm exec import-dsh && pnpm build，重新加载扩展后生效（构建期合并，CSP-safe）。`,
+    })
   }
 
-  /** 删除插件：双写移除后提示刷新生效 */
-  async function removePlugin(id: string) {
-    const next = await removeUserPlugin(id)
-    setUserPlugins(next)
-    setPluginMsg({ kind: 'ok', text: `已移除 ${id} —— 重新加载 dsh 页面后生效` })
+  /** 查看已内置用户插件的最新清单 */
+  async function refreshPlugins() {
+    setBuiltInPlugins(await listBuiltInUserPlugins())
   }
 
   const visibleTree = filterTree(tree, treeQuery)
@@ -525,9 +525,15 @@ export function App() {
       {tab === 'plugins' && (
         <div className="plugins">
           <p className="settings__hint">
-            添加 dsh client 插件 bundle（与官方 client.js 同格式：<code>{`window.__ModuleLoader__.load({ id, factory })`}</code>）。
-            选择或粘贴 bundle 源码后点「添加」；保存后<strong>重新加载 dsh 页面</strong>（刷新 chat.deepseek.com 或重开 dsh 模式）生效。
+            添加 dsh client 插件 bundle（与官方 client.js 同格式：<code>{`window.__ModuleLoader__.load({ id, factory })`}</code>，如
+            dshsp 的 <code>lib/client.js</code>）。MV3 扩展页 CSP 禁止运行时注入（blob/data/eval 均不可用），
+            插件需在<strong>构建期</strong>合并进扩展包内生效：
           </p>
+          <ol className="plugins__steps">
+            <li>将 bundle 源码保存为仓库 <code>user-plugins/&lt;id&gt;.js</code>（id 为插件包名，如 <code>@oneinitai/dsh-settings-plus.js</code>）</li>
+            <li>运行 <code>pnpm exec import-dsh</code>（合并进 <code>dsh-web/user-plugins/</code> 并追加 boot entries）+ <code>pnpm build</code></li>
+            <li>在 chrome://extensions 重新加载扩展，刷新页面后生效</li>
+          </ol>
 
           <div className="plugins__add">
             <input
@@ -539,8 +545,8 @@ export function App() {
             />
             <textarea
               className="plugins__src"
-              placeholder="或粘贴 bundle 源码…"
-              rows={6}
+              placeholder="或粘贴 bundle 源码进行校验…"
+              rows={5}
               value={pluginSrc}
               onChange={(e) => {
                 setPluginSrc(e.target.value)
@@ -551,7 +557,7 @@ export function App() {
               <div className="plugins__detected">识别到插件 id：<code>{pluginName}</code></div>
             )}
             <button className="btn btn--primary" onClick={() => void addPlugin()}>
-              添加插件
+              校验插件
             </button>
             {pluginMsg && (
               <div className={`ws-note ${pluginMsg.kind === 'ok' ? 'ws-note--ok' : 'ws-note--err'}`}>
@@ -561,16 +567,19 @@ export function App() {
           </div>
 
           <div className="plugins__list">
-            {userPlugins.length === 0 ? (
-              <div className="chat__empty">（尚未添加用户插件）</div>
+            <div className="plugins__list-head">
+              <span>已内置的用户插件（来自 user-plugins/）</span>
+              <button className="btn btn--small" onClick={() => void refreshPlugins()}>
+                刷新
+              </button>
+            </div>
+            {builtInPlugins.length === 0 ? (
+              <div className="chat__empty">（暂无 —— 添加 bundle 到 user-plugins/ 并重新构建后出现）</div>
             ) : (
-              userPlugins.map((p) => (
+              builtInPlugins.map((p) => (
                 <div key={p.id} className="plugin-row">
                   <span className="plugin-row__id">{p.id}</span>
-                  <span className="plugin-row__meta">{new Date(p.addedAt).toLocaleString()}</span>
-                  <button className="btn btn--danger btn--small" onClick={() => void removePlugin(p.id)}>
-                    移除
-                  </button>
+                  <span className="plugin-row__meta">{p.source} · {p.rev}</span>
                 </div>
               ))
             )}
