@@ -10,6 +10,7 @@
  */
 import { RpcId, serverResponseSchema } from '@deepseek-ai/dsh-host-apiproxy/api';
 import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api';
+import { isContextInvalidated, recoverInvalidatedContext } from './context-recovery';
 
 const CHANNEL_PATTERN = /^\/[A-Za-z0-9._~-]+$/;
 const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/;
@@ -52,6 +53,7 @@ export function createBridgeConnectionRpc(): ClientConnectionRpc {
           : await raceSignal(chrome.runtime.sendMessage({ kind: 'dsh-rpc', method: endpoint, body: message }), signal);
       } catch (error) {
         if (isAborted(signal)) throw abortError(signal);
+        if (isContextInvalidated(error)) recoverInvalidatedContext();
         throw new Error(`transport failure for ${channel}/${endpoint}: ${describe(error)}`);
       }
       const full = serverResponseSchema.parse(unwrapResultBody(reply, `${channel}/${endpoint}`));

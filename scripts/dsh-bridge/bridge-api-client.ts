@@ -13,6 +13,7 @@ import { AbstractApiClient } from '@deepseek-ai/dsh-host-apiproxy/client';
 import { serverRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema';
 import { hostFrameSchema, muxFrameSchema } from '@deepseek-ai/dsh-host-apiproxy/api/events.schema';
 import type { HostFrame, MuxFrame, RpcRequest, ServerRequest } from '@deepseek-ai/dsh-host-apiproxy/api';
+import { isContextInvalidated, recoverInvalidatedContext } from './context-recovery';
 
 /** One enqueued stream event: a parsed frame or the end-of-stream marker. */
 type InboxItem<F> =
@@ -52,6 +53,7 @@ export class BridgeApiClient extends AbstractApiClient {
         : await raceSignal(chrome.runtime.sendMessage(message), signal);
     } catch (error) {
       if (isAborted(signal)) throw abortError(signal);
+      if (isContextInvalidated(error)) recoverInvalidatedContext();
       throw transportFailure(`/api/${method}`, error);
     }
     return new Response(JSON.stringify(unwrapResultBody(reply, `/api/${method}`)), {
@@ -90,7 +92,13 @@ export class BridgeApiClient extends AbstractApiClient {
     frameSchema: FrameSchema<F>,
     onOpen?: () => void,
   ): AsyncGenerator<RpcRequest<F>> {
-    const port = chrome.runtime.connect({ name: 'dsh-stream' });
+    let port: chrome.runtime.Port;
+    try {
+      port = chrome.runtime.connect({ name: 'dsh-stream' });
+    } catch (error) {
+      if (isContextInvalidated(error)) recoverInvalidatedContext();
+      throw transportFailure(`dsh-stream (${stream})`, error);
+    }
     const inbox: InboxItem<F>[] = [];
     let wake: (() => void) | undefined;
     let opened = false;
@@ -129,6 +137,12 @@ export class BridgeApiClient extends AbstractApiClient {
       enqueue({ kind: 'frame', envelope: { rpcId: full.rpcId, payload: frame } });
     };
     const handleDisconnect = (): void => {
+      // Port 因扩展上下文失效而断开（extension reload/update）时，同样需要
+      // 重载宿主页面恢复；普通断流（SW 重启、主动断开）则由上层重连循环兜底。
+      const lastError = chrome.runtime.lastError;
+      if (lastError !== undefined && isContextInvalidated(lastError)) {
+        recoverInvalidatedContext();
+      }
       ended = true;
       enqueue({ kind: 'end' });
     };
