@@ -37,7 +37,7 @@ import type { Skill } from '@/utils/skills/skill'
 import type { LlmStreamEvent } from '@/utils/plugin/host'
 import { getSettings, patchSettings, type DshSettings } from '@/utils/settings/settings'
 import { DSH_AGENT_PRESET_CONTENTS } from '@/utils/agent-presets/contents'
-import { presetSystemPrompt } from '@/utils/agent-presets/persona'
+import { DEFAULT_PERSONA, presetSystemPrompt } from '@/utils/agent-presets/persona'
 import {
   ChromeSettingsStorageBackend,
   createOfficialSettingsProvider,
@@ -321,10 +321,17 @@ export default defineBackground(() => {
 
     try {
       const tools = buildAgentTools(ws, skills)
+      // 统一 persona 注入：任何入口（dsh 会话 / side panel 原生聊天）进入
+      // runStream 时，若无 system 前缀则注入默认 persona；dsh 会话路径
+      // （session.prompt）已按 agentPreset 注入 system，此处跳过避免重复。
+      const injected: Message[] =
+        messages.length > 0 && messages[0]?.role === 'system'
+          ? messages
+          : [{ role: 'system', content: DEFAULT_PERSONA }, ...messages]
       const result = await runAgentLoop({
         llm: llmBridge,
         tools,
-        messages,
+        messages: injected,
         maxTurns: 8,
         onEvent: (ev, round) => {
           if (ev.kind === 'thinking') pushBridgeEvent({ kind: 'thinking', text: ev.text })

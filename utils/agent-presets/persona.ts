@@ -65,7 +65,7 @@ const PRESET_META: ReadonlyArray<PresetMeta> = [
 ]
 
 /** 无预设 / 未知预设时的「网页对话」通用 persona */
-const DEFAULT_PERSONA =
+export const DEFAULT_PERSONA =
   'You are a helpful assistant on the chat.deepseek.com web interface. ' +
   'Help the user with their requests, using the available tools (file editing, shell, search, skills) when asked.'
 
