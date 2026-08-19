@@ -20,7 +20,10 @@ import {
   type ChatStreamStartPayload,
 } from '@/utils/messages'
 import { runAgentLoop } from '@/utils/agent/loop'
+import { runOpenAiAgentLoop } from '@/utils/agent/loop-openai'
 import { buildAgentTools } from '@/utils/agent/tools'
+import type { OpenAiMessage } from '@/utils/llm/openai-client'
+import { getActiveLlmProvider } from '@/utils/llm/providers'
 import {
   isRealDirPath,
   RealDirectoryWorkspace,
@@ -1165,7 +1168,7 @@ export default defineBackground(() => {
       }
     }
 
-    void runStream(messages, currentReasoning, currentSearch, {
+    const sessionSink: StreamSink = {
       onEvent: (ev, round) => {
         if (round !== currentRound) {
           // 进入新一轮（工具调用场景才有第 2+ 轮）：上一轮结束，新一轮打开
@@ -1247,7 +1250,38 @@ export default defineBackground(() => {
         })
         finishRunning()
       },
-    }, rec.agentPreset)
+    }
+    // 5) 第三方供应商分流：配置了 OpenAI 兼容供应商（dsh-llm-providers）→
+    //    原生 function calling agent loop（工具调用真实工作）；
+    //    未配置 → 回退网页 bridge（chat.deepseek.com 普通聊天）。
+    const activeProvider = await getActiveLlmProvider()
+    if (activeProvider) {
+      void (async () => {
+        try {
+          const ws = new Workspace({ sandboxMode: 'workspace-write', dbName: 'dsh-in-web-workspace' })
+          await ws.init()
+          const tools = buildAgentTools(ws, skills, rec.agentPreset)
+          const openAiMessages: OpenAiMessage[] = messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+          }))
+          await runOpenAiAgentLoop({
+            apiKey: activeProvider.apiKey,
+            baseURL: activeProvider.baseURL,
+            model: activeProvider.model,
+            tools,
+            messages: openAiMessages,
+            maxTurns: 8,
+            onEvent: sessionSink.onEvent,
+          })
+          sessionSink.onFinish()
+        } catch (err) {
+          sessionSink.onError(err instanceof Error ? err.message : String(err))
+        }
+      })()
+    } else {
+      void runStream(messages, currentReasoning, currentSearch, sessionSink, rec.agentPreset)
+    }
     return { ok: true, value: { accepted: true } }
   }
 

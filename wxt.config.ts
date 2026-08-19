@@ -14,7 +14,7 @@ export default defineConfig({
       'contextMenus',
       'unlimitedStorage',
     ],
-    host_permissions: ['https://chat.deepseek.com/*'],
+    host_permissions: ['https://chat.deepseek.com/*', '<all_urls>'],
     web_accessible_resources: [
       {
         // 允许页面 iframe 加载 dsh 面板（dsh-ui.content.ts 注入）。
