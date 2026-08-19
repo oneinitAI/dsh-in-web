@@ -37,11 +37,19 @@ export interface WorkspaceOptions {
   dbName?: string
 }
 
+/** Windows 盘符前缀（C: / C:/ / C:/foo / C:\foo），用作虚拟 FS 的子根分区 */
+const DRIVE_PREFIX_RE = /^([A-Za-z]:)(?:\/(.*))?$/
+
 /** Path normalization + traversal guard. */
 export function resolvePath(input: string): string {
   if (typeof input !== 'string' || input.trim() === '') throw new Error('path must be a non-empty string')
   const normalized = input.replace(/\\/g, '/')
-  const parts = normalized.split('/').filter((p) => p !== '' && p !== '.')
+  // 盘符路径保留盘符作为子根（C:/foo → C:/foo，C:/ → C:），
+  // 让单库 IndexedDB 里以 C:/ 前缀分区，不混入根 '/' 下。
+  const driveMatch = DRIVE_PREFIX_RE.exec(normalized)
+  const drive = driveMatch ? driveMatch[1]! : ''
+  const body = driveMatch ? driveMatch[2] ?? '' : normalized
+  const parts = body.split('/').filter((p) => p !== '' && p !== '.')
   const out: string[] = []
   for (const part of parts) {
     if (part === '..') {
@@ -51,6 +59,7 @@ export function resolvePath(input: string): string {
       out.push(part)
     }
   }
+  if (drive) return out.length === 0 ? drive : `${drive}/${out.join('/')}`
   return '/' + out.join('/')
 }
 
@@ -227,5 +236,17 @@ export class Workspace {
     this.assertWritable()
     const p = resolvePath(path)
     await this.deleteRecord(p)
+  }
+
+  /** Create a directory (with ancestors). No-op when it already exists as a dir. */
+  async mkdir(path: string): Promise<void> {
+    this.assertWritable()
+    const p = resolvePath(path)
+    if (p === '/') return
+    await this.ensureParentDirs(p)
+    const existing = await this.getRecord<DirRecord | FileRecord>(p)
+    if (existing?.kind === 'dir') return
+    if (existing?.kind === 'file') throw new Error(`cannot mkdir: ${p} is a file`)
+    await this.putRecord({ path: p, kind: 'dir' })
   }
 }

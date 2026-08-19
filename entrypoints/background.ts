@@ -505,11 +505,54 @@ export default defineBackground(() => {
     return `ws-${(hash >>> 0).toString(36)}`
   }
 
+  /**
+   * 虚拟盘符集合（Windows 常见盘符）。浏览器沙盒内是逻辑分区——
+   * 全部落在同一个 IndexedDB Workspace，按 `C:/` 前缀分区。
+   */
+  const DSH_DRIVES: readonly string[] = ['C:', 'D:', 'E:', 'F:', 'G:']
+
+  /** 盘符路径归一化：C:\foo → C:/foo，去掉尾部斜杠（C:/ → C:） */
+  function normalizeDrivePath(path: string): string {
+    return path.replace(/\\/g, '/').replace(/\/+$/, '')
+  }
+
+  /**
+   * 构造目录浏览的面包屑链：盘符路径（C:/foo）首段为盘符本身
+   * （path 为 C:，点击可跳回盘符根），其余段逐级累积。
+   */
+  function buildCrumbs(path: string): { name: string; path: string; hidden: false }[] {
+    const driveMatch = /^([A-Za-z]:)(?:\/(.*))?$/.exec(path)
+    if (driveMatch) {
+      const drive = driveMatch[1]!
+      const rest = driveMatch[2] ?? ''
+      const crumbs: { name: string; path: string; hidden: false }[] = [
+        { name: drive, path: drive, hidden: false },
+      ]
+      if (!rest) return crumbs
+      let acc = drive
+      for (const seg of rest.split('/').filter(Boolean)) {
+        acc += '/' + seg
+        crumbs.push({ name: seg, path: acc, hidden: false })
+      }
+      return crumbs
+    }
+    let acc = ''
+    return path
+      .split('/')
+      .filter(Boolean)
+      .map((seg) => {
+        acc += '/' + seg
+        return { name: seg, path: acc, hidden: false }
+      })
+  }
+
   /** path 兜底：缺失时回落虚拟根路径；虚拟路径标识（<...>）原样保留 */
   function normalizeWorkspacePath(path: unknown): string {
     if (typeof path !== 'string' || !path.trim()) return `<${DSH_WORKSPACE_ID}>`
     const trimmed = path.trim()
     if (trimmed.startsWith('<')) return trimmed
+    // 盘符路径（C:/foo / C:\foo / C:）：保留盘符前缀，不再强制加 '/'
+    if (/^[A-Za-z]:/.test(trimmed)) return normalizeDrivePath(trimmed)
     return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
   }
 
@@ -1731,26 +1774,34 @@ export default defineBackground(() => {
     // （对齐 hostListDirectoryValueSchema：path/home/crumbs/entries/truncated）。
     // entries 为 directoryEntrySchema = {name, path, hidden} 数组：目录项与文件项
     // 都返回，name 取路径最后一段，path 用完整路径；crumbs 按路径分段逐段累积。
+    // 根层（/）返回虚拟盘符列表（C:/D:/E:...），选择盘符（C:）后进入该盘符的
+    // 目录树（Workspace 单库内以 C:/ 前缀分区）。
     'host.listDirectory': async (payload) => {
       const p = (payload ?? {}) as { path?: unknown }
-      const path = typeof p.path === 'string' && p.path ? p.path : '/'
+      const rawPath = typeof p.path === 'string' && p.path ? p.path : '/'
       try {
         const ws = await getQueryWs()
+        // 根层：返回盘符列表作为目录 entries，home '/'、crumbs 空
+        if (rawPath === '/' || rawPath === '') {
+          return {
+            ok: true,
+            value: {
+              path: '/',
+              home: '/',
+              crumbs: [],
+              entries: DSH_DRIVES.map((drive) => ({ name: drive, path: drive, hidden: false })),
+              truncated: false,
+            },
+          }
+        }
+        const path = normalizeDrivePath(rawPath)
         const entries = await ws.list(path)
-        let acc = ''
-        const crumbs: { name: string; path: string; hidden: false }[] = path
-          .split('/')
-          .filter(Boolean)
-          .map((seg) => {
-            acc += '/' + seg
-            return { name: seg, path: acc, hidden: false }
-          })
         return {
           ok: true,
           value: {
             path,
             home: '/',
-            crumbs,
+            crumbs: buildCrumbs(path),
             entries: entries.map((e) => {
               const name = e.path.split('/').filter(Boolean).pop() ?? e.path
               return { name, path: e.path, hidden: false }
@@ -1770,18 +1821,26 @@ export default defineBackground(() => {
       }
     },
     // host.pickDirectory：工作区目录选择对话框。浏览器无真实目录选择器，
-    // 返回默认虚拟路径 <dsh-in-web>（与 host.describe 的 cwd 一致），
+    // 返回默认盘符路径 C:（与 host.describe 的 cwd 同属虚拟 FS），
     // 让「选择目录 → 创建工作区」流程不被 null（用户取消）中断。
-    'host.pickDirectory': () => ({ ok: true, value: { path: '<dsh-in-web>' } }),
+    'host.pickDirectory': () => ({ ok: true, value: { path: DSH_DRIVES[0] ?? 'C:' } }),
     // host.createDirectory：新建文件夹（对齐 hostCreateDirectoryValueSchema：
-    // request { path, name }，value { path }）。不做真实 FS 创建，返回合成绝对路径
-    // 即可让 UI 刷新目录；path/name 缺失时兜底 '/'，避免 UI 拿到非法路径。
-    'host.createDirectory': (payload) => {
+    // request { path, name }，value { path }）。在 Workspace 里真实 mkdir
+    // 该目录（含父级），让新建后的目录树刷新能看到；失败时仍返回合成绝对路径
+    // 兜底，避免打断 UI 浏览。
+    'host.createDirectory': async (payload) => {
       const p = (payload ?? {}) as { path?: unknown; name?: unknown }
-      const path = typeof p.path === 'string' && p.path ? p.path : ''
-      const name = typeof p.name === 'string' && p.name ? p.name : ''
+      const path = typeof p.path === 'string' && p.path ? normalizeDrivePath(p.path) : ''
+      const name = typeof p.name === 'string' && p.name ? p.name.trim() : ''
       if (!path || !name) return { ok: true, value: { path: '/' } }
-      return { ok: true, value: { path: `${path}/${name}` } }
+      const target = `${path}/${name}`
+      try {
+        const ws = await getQueryWs()
+        await ws.mkdir(target)
+      } catch {
+        // 创建失败静默：仍返回合成路径，避免目录浏览流程中断
+      }
+      return { ok: true, value: { path: target } }
     },
     'session.list': dshSessionList,
     'session.search': () => ({ ok: true, value: { items: [], hasMore: false } }),
