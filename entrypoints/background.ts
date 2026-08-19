@@ -1251,10 +1251,11 @@ export default defineBackground(() => {
         finishRunning()
       },
     }
-    // 5) 第三方供应商分流：配置了 OpenAI 兼容供应商（dsh-llm-providers）→
+    // 5) 第三方供应商分流：配置了 OpenAI 兼容供应商（官方 llm-pi-ai
+    //    模型设置页配置的 providers.<route> + dsh-credentials）→
     //    原生 function calling agent loop（工具调用真实工作）；
     //    未配置 → 回退网页 bridge（chat.deepseek.com 普通聊天）。
-    const activeProvider = await getActiveLlmProvider()
+    const activeProvider = await getConfiguredLlmProvider()
     if (activeProvider) {
       void (async () => {
         try {
@@ -1657,26 +1658,82 @@ export default defineBackground(() => {
   }
 
   // ── llm.*（固定模型目录）────────────────────────────────────────
-  function dshLlmProviders(): DshRpcResult {
-    return {
-      ok: true,
-      value: {
-        providers: [
-          {
-            provider: 'deepseek',
-            displayName: 'DeepSeek (网页版)',
-            settingsNs: DSH_SETTINGS_NS,
-            // settingsPath 必须为空数组：dsh-client-ui-settings-models 用
-            // nodeAtPath(rehydrateSchema(namespace.schema), settingsPath) 解析节点，
-            // 我们的 namespace.schema 是空对象（type 为空），任何非空 path 都会解析
-            // 失败并渲染 "unresolvable settings path"。空数组让 nodeAtPath 返回 root
-            // 节点本身（configured 判定走 settingsPath.length === 0 分支，恒成立）。
-            settingsPath: [],
-            active: true,
-          },
-        ],
-      },
+  /**
+   * 解析当前可用的第三方 OpenAI 兼容供应商。
+   * 优先读官方配置：dsh 模型设置页（dsh-client-ui-settings-models）「添加自定义
+   * 提供方」写入 llm-pi-ai namespace 的 providers.<route>（profile 含
+   * apiKeyEnv/baseURL/models），API key 经 credentials.set 存到
+   * dsh-credentials[apiKeyEnv]。逐一检查每个 route，取第一个
+   * 同时具备 apiKey + baseURL + model 的；官方配置没有时，回退读自定义
+   * dsh-llm-providers（扩展侧直配）。返回 undefined 表示未配置第三方
+   * 供应商（调用方回退网页 bridge）。
+   */
+  async function getConfiguredLlmProvider(): Promise<
+    { apiKey: string; baseURL: string; model: string } | undefined
+  > {
+    const provider = await getOfficialSettings()
+    if (provider !== null) {
+      const desc = provider.describe({ redactSecrets: true }).find((d) => d.ns === 'llm-pi-ai')
+      const value = desc?.value as
+        | { providers?: Record<string, { apiKeyEnv?: string; baseURL?: string; models?: Array<{ id: string }> }> }
+        | undefined
+      const creds = await readCredentials()
+      const routes = value?.providers ?? {}
+      for (const profile of Object.values(routes)) {
+        if (typeof profile !== 'object' || profile === null) continue
+        const apiKeyEnv = profile.apiKeyEnv
+        const apiKey = apiKeyEnv ? creds[apiKeyEnv] : undefined
+        if (typeof apiKey !== 'string' || apiKey.length === 0) continue
+        const baseURL = profile.baseURL
+        const model = profile.models?.[0]?.id
+        if (baseURL && model) return { apiKey, baseURL, model }
+      }
     }
+    const active = await getActiveLlmProvider()
+    if (active) return { apiKey: active.apiKey, baseURL: active.baseURL, model: active.model }
+    return undefined
+  }
+
+  async function dshLlmProviders(): Promise<DshRpcResult> {
+    const providers: Array<{
+      provider: string
+      displayName: string
+      settingsNs: string
+      settingsPath: readonly string[]
+      active: boolean
+    }> = [
+      {
+        provider: 'deepseek',
+        displayName: 'DeepSeek (网页版)',
+        settingsNs: DSH_SETTINGS_NS,
+        // settingsPath 必须为空数组：dsh-client-ui-settings-models 用
+        // nodeAtPath(rehydrateSchema(namespace.schema), settingsPath) 解析节点，
+        // 我们的 namespace.schema 是空对象（type 为空），任何非空 path 都会解析
+        // 失败并渲染 "unresolvable settings path"。空数组让 nodeAtPath 返回 root
+        // 节点本身（configured 判定走 settingsPath.length === 0 分支，恒成立）。
+        settingsPath: [],
+        active: true,
+      },
+    ]
+    // 把 dsh 模型设置页「添加自定义提供方」写入 llm-pi-ai.providers.<route> 的
+    // 供应商条目化，模型设置页据此渲染配置区（settingsNs 指向官方 namespace，
+    // settingsPath 指向该 route 的 profile；credentials 经 apiKeyEnv 关联）。
+    const provider = await getOfficialSettings()
+    if (provider !== null) {
+      const desc = provider.describe({ redactSecrets: true }).find((d) => d.ns === 'llm-pi-ai')
+      const value = desc?.value as { providers?: Record<string, unknown> } | undefined
+      const routes = value?.providers ?? {}
+      for (const route of Object.keys(routes)) {
+        providers.push({
+          provider: route,
+          displayName: route,
+          settingsNs: 'llm-pi-ai',
+          settingsPath: ['providers', route],
+          active: false,
+        })
+      }
+    }
+    return { ok: true, value: { providers } }
   }
 
   function dshLlmModels(): DshRpcResult {
