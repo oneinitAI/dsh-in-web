@@ -36,6 +36,7 @@ import {
   type SettingsProviderInstance,
 } from '@/utils/official-settings/runtime'
 import { OFFICIAL_NAMESPACES } from '@/utils/official-settings/namespaces'
+import { OFFICIAL_PLUGIN_ROSTER } from '@/utils/official-settings/plugin-roster'
 import type { SettingsNamespace, SettingsPathOp } from '@/utils/official-settings/types'
 
 interface PageState {
@@ -407,7 +408,6 @@ export default defineBackground(() => {
 
   /** 固定单工作区（本地 IndexedDB 虚拟 FS 映射为 harness 的一个 workspace 实体） */
   const DSH_WORKSPACE_ID = 'dsh-in-web'
-  const DSH_WORKSPACE_TITLE_KEY = 'dsh-workspace-title'
   const DSH_WORKSPACE_CREATED_AT = new Date().toISOString()
 
   /** 固定模型目录（llm.models / session.models 共用；参考 utils/bridge/protocol.ts 的模型面） */
@@ -436,6 +436,85 @@ export default defineBackground(() => {
     updatedAt: string
   }
 
+  // ── workspace 记录持久化（chrome.storage.local）────────────────────
+  // workspace.create 真正创建一条记录并写入 dsh-workspaces；workspace.list
+  // 读回全部记录。同一 path 幂等（created: false），对齐官方 adoption 语义。
+  const DSH_WORKSPACES_KEY = 'dsh-workspaces'
+
+  /** 真实创建的工作区记录（workspaceViewSchema 的持久化形态） */
+  interface DshWorkspaceRecord {
+    workspaceId: string
+    path: string
+    title: string
+    sessionIds: string[]
+    createdAt: string
+    updatedAt: string
+  }
+
+  function isDshWorkspaceRecord(value: unknown): value is DshWorkspaceRecord {
+    if (typeof value !== 'object' || value === null) return false
+    const r = value as Record<string, unknown>
+    return typeof r.workspaceId === 'string'
+      && typeof r.path === 'string'
+      && typeof r.title === 'string'
+      && Array.isArray(r.sessionIds)
+      && typeof r.createdAt === 'string'
+      && typeof r.updatedAt === 'string'
+  }
+
+  async function readWorkspaces(): Promise<DshWorkspaceRecord[]> {
+    try {
+      const stored = await chrome.storage.local.get(DSH_WORKSPACES_KEY)
+      const list = stored[DSH_WORKSPACES_KEY]
+      if (!Array.isArray(list)) return []
+      return list.filter(isDshWorkspaceRecord)
+    } catch {
+      return []
+    }
+  }
+
+  async function writeWorkspaces(records: DshWorkspaceRecord[]): Promise<void> {
+    try {
+      await chrome.storage.local.set({ [DSH_WORKSPACES_KEY]: records })
+    } catch {
+      // 写失败静默（非扩展环境）
+    }
+  }
+
+  /** 由 path 生成稳定 workspaceId：同 path 重复 create 幂等返回同一 id */
+  function workspaceIdFromPath(path: string): string {
+    let hash = 0
+    for (let i = 0; i < path.length; i += 1) hash = (hash * 31 + path.charCodeAt(i)) | 0
+    return `ws-${(hash >>> 0).toString(36)}`
+  }
+
+  /** path 兜底：缺失时回落虚拟根路径；虚拟路径标识（<...>）原样保留 */
+  function normalizeWorkspacePath(path: unknown): string {
+    if (typeof path !== 'string' || !path.trim()) return `<${DSH_WORKSPACE_ID}>`
+    const trimmed = path.trim()
+    if (trimmed.startsWith('<')) return trimmed
+    return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  }
+
+  /** 默认标题：path 的 basename（去掉虚拟路径尖括号）；无法取名时回落默认工作区 id */
+  function workspaceBasename(path: string): string {
+    const cleaned = path.replace(/^<(.+)>$/, '$1').replace(/\/+$/, '')
+    const idx = cleaned.lastIndexOf('/')
+    const base = idx < 0 ? cleaned : cleaned.slice(idx + 1)
+    return base || DSH_WORKSPACE_ID
+  }
+
+  function toWorkspaceView(record: DshWorkspaceRecord): DshWorkspaceView {
+    return {
+      workspaceId: record.workspaceId,
+      path: record.path,
+      title: record.title,
+      sessionIds: record.sessionIds,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    }
+  }
+
   let virtualSessionSeq = 0
   function mintVirtualSessionId(): string {
     virtualSessionSeq += 1
@@ -454,36 +533,6 @@ export default defineBackground(() => {
     createdAt: number
   }
   const virtualSessions = new Map<string, VirtualSessionRecord>()
-
-  async function getWorkspaceTitle(): Promise<string> {
-    try {
-      const stored = await chrome.storage.local.get(DSH_WORKSPACE_TITLE_KEY)
-      const title = stored[DSH_WORKSPACE_TITLE_KEY]
-      return typeof title === 'string' && title.trim() ? title.trim() : 'dsh-in-web'
-    } catch {
-      return 'dsh-in-web'
-    }
-  }
-
-  async function setWorkspaceTitle(title: string): Promise<void> {
-    try {
-      await chrome.storage.local.set({ [DSH_WORKSPACE_TITLE_KEY]: title.trim() || 'dsh-in-web' })
-    } catch {
-      // 写失败静默（非扩展环境）
-    }
-  }
-
-  async function buildWorkspaceView(): Promise<DshWorkspaceView> {
-    const title = await getWorkspaceTitle()
-    return {
-      workspaceId: DSH_WORKSPACE_ID,
-      path: '/',
-      title,
-      sessionIds: [],
-      createdAt: DSH_WORKSPACE_CREATED_AT,
-      updatedAt: new Date().toISOString(),
-    }
-  }
 
   /** 提取 session.prompt content 里的纯文本（text 类型 part） */
   function extractPromptText(content: unknown): string {
@@ -592,37 +641,91 @@ export default defineBackground(() => {
     }
   }
 
-  // ── workspace.*（桥接到本地 IndexedDB Workspace）────────────────
+  // ── workspace.*（chrome.storage.local 真实持久化的工作区记录）────
   async function dshWorkspaceList(): Promise<DshRpcResult> {
-    await getQueryWs() // 初始化本地 IndexedDB 工作区
-    const view = await buildWorkspaceView()
-    return { ok: true, value: { items: [view], archivedSessionIds: [] } }
+    const records = await readWorkspaces()
+    return { ok: true, value: { items: records.map(toWorkspaceView), archivedSessionIds: [] } }
   }
 
-  async function dshWorkspaceCreate(): Promise<DshRpcResult> {
-    await getQueryWs()
-    const view = await buildWorkspaceView()
-    return { ok: true, value: { workspace: view, created: false } }
+  async function dshWorkspaceCreate(payload: unknown): Promise<DshRpcResult> {
+    const p = (payload ?? {}) as { path?: unknown; title?: unknown }
+    const path = normalizeWorkspacePath(p.path)
+    const records = await readWorkspaces()
+    // 官方 adoption 语义：同一 path 已归属某 workspace 时幂等返回（created: false）
+    const existing = records.find((r) => r.path === path)
+    if (existing) return { ok: true, value: { workspace: toWorkspaceView(existing), created: false } }
+    const now = new Date().toISOString()
+    const record: DshWorkspaceRecord = {
+      workspaceId: workspaceIdFromPath(path),
+      path,
+      title: typeof p.title === 'string' && p.title.trim() ? p.title.trim() : workspaceBasename(path),
+      sessionIds: [],
+      createdAt: now,
+      updatedAt: now,
+    }
+    await writeWorkspaces([...records, record])
+    return { ok: true, value: { workspace: toWorkspaceView(record), created: true } }
   }
 
   async function dshWorkspaceRename(payload: unknown): Promise<DshRpcResult> {
-    const p = (payload ?? {}) as { title?: unknown }
-    const title = typeof p.title === 'string' && p.title.trim() ? p.title.trim() : 'dsh-in-web'
-    await setWorkspaceTitle(title)
-    await getQueryWs()
-    const view = await buildWorkspaceView()
-    return { ok: true, value: { workspace: view } }
+    const p = (payload ?? {}) as { workspaceId?: unknown; title?: unknown }
+    const workspaceId = typeof p.workspaceId === 'string' && p.workspaceId ? p.workspaceId : DSH_WORKSPACE_ID
+    const title = typeof p.title === 'string' && p.title.trim() ? p.title.trim() : DSH_WORKSPACE_ID
+    const records = await readWorkspaces()
+    const record = records.find((r) => r.workspaceId === workspaceId)
+    if (!record) {
+      return { ok: false, error: { code: 'workspace-not-found', message: `workspace not found: ${workspaceId}`, details: { workspaceId } } }
+    }
+    const next: DshWorkspaceRecord = { ...record, title, updatedAt: new Date().toISOString() }
+    await writeWorkspaces(records.map((r) => (r.workspaceId === workspaceId ? next : r)))
+    return { ok: true, value: { workspace: toWorkspaceView(next) } }
   }
 
-  async function dshWorkspaceDelete(): Promise<DshRpcResult> {
-    await getQueryWs()
+  async function dshWorkspaceDelete(payload: unknown): Promise<DshRpcResult> {
+    const p = (payload ?? {}) as { workspaceId?: unknown }
+    const workspaceId = typeof p.workspaceId === 'string' && p.workspaceId ? p.workspaceId : ''
+    const records = await readWorkspaces()
+    const next = records.filter((r) => r.workspaceId !== workspaceId)
+    if (next.length === records.length) {
+      return { ok: false, error: { code: 'workspace-not-found', message: `workspace not found: ${workspaceId}`, details: { workspaceId } } }
+    }
+    await writeWorkspaces(next)
     return { ok: true, value: { deleted: true } }
   }
 
-  async function dshWorkspaceInsertSessionBefore(): Promise<DshRpcResult> {
-    await getQueryWs()
-    const view = await buildWorkspaceView()
-    return { ok: true, value: { workspace: view } }
+  async function dshWorkspaceInsertSessionBefore(payload: unknown): Promise<DshRpcResult> {
+    const p = (payload ?? {}) as { workspaceId?: unknown; sessionId?: unknown; beforeSessionId?: unknown }
+    const workspaceId = typeof p.workspaceId === 'string' && p.workspaceId ? p.workspaceId : ''
+    const sessionId = typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : ''
+    const records = await readWorkspaces()
+    // 缺省参数（UI 有时只带 sessionId）兜底：把会话并入首工作区，避免进入流程中断
+    const target = records.find((r) => r.workspaceId === workspaceId) ?? records[0]
+    if (!target) return { ok: true, value: { workspace: toWorkspaceView(await thisFallbackWorkspace()) } }
+    let sessionIds = target.sessionIds.filter((id) => id !== sessionId)
+    const beforeSessionId = typeof p.beforeSessionId === 'string' && p.beforeSessionId ? p.beforeSessionId : undefined
+    if (sessionId) {
+      if (beforeSessionId && sessionIds.includes(beforeSessionId)) {
+        const idx = sessionIds.indexOf(beforeSessionId)
+        sessionIds.splice(idx, 0, sessionId)
+      } else {
+        sessionIds.push(sessionId)
+      }
+    }
+    const next: DshWorkspaceRecord = { ...target, sessionIds, updatedAt: new Date().toISOString() }
+    await writeWorkspaces(records.map((r) => (r.workspaceId === target.workspaceId ? next : r)))
+    return { ok: true, value: { workspace: toWorkspaceView(next) } }
+  }
+
+  /** 无任何工作区记录时的兜底视图（进入工作区流程不因空清单中断） */
+  async function thisFallbackWorkspace(): Promise<DshWorkspaceRecord> {
+    return {
+      workspaceId: DSH_WORKSPACE_ID,
+      path: `<${DSH_WORKSPACE_ID}>`,
+      title: DSH_WORKSPACE_ID,
+      sessionIds: [],
+      createdAt: DSH_WORKSPACE_CREATED_AT,
+      updatedAt: new Date().toISOString(),
+    }
   }
 
   // ── skill.list（本地 skill 库）──────────────────────────────────
@@ -990,36 +1093,29 @@ export default defineBackground(() => {
     return dshAgentPresetError(id, 'agent-preset-read-only', 'system preset cannot be removed')
   }
 
-  // ── pluginInventory.*（boot-manifest 内置插件清单）─────────────────────
+  // ── pluginInventory.*（官方插件 roster 静态清单）────────────────────
   interface DshPluginInventoryEntry {
     entryId: string
     moduleName: string
     enabled: boolean
-    fiberPhase: string
+    fiberPhase: string | null
   }
 
-  /** 从扩展资源读取 boot-manifest.js 并解析 entries（SW 无 public 路径，走 chrome.runtime URL） */
-  async function dshPluginInventoryList(): Promise<DshRpcResult> {
-    try {
-      const res = await fetch(chrome.runtime.getURL('dsh-web/boot-manifest.js'))
-      const text = await res.text()
-      // boot-manifest.js 形如 `window.__DSH_BOOT__ = {...};`，截取对象字面量做 JSON 解析
-      const start = text.indexOf('{')
-      const end = text.lastIndexOf('};')
-      if (start < 0 || end <= start) return { ok: true, value: { entries: [] } }
-      const boot = JSON.parse(text.slice(start, end + 1)) as {
-        entries?: ReadonlyArray<{ id?: unknown }>
-      }
-      const entries: DshPluginInventoryEntry[] = (boot.entries ?? []).flatMap((e) => {
-        if (typeof e?.id !== 'string' || !e.id) return []
-        // 内置插件全部加载成功 → enabled true、fiberPhase active
-        return [{ entryId: e.id, moduleName: e.id, enabled: true, fiberPhase: 'active' }]
-      })
-      return { ok: true, value: { entries } }
-    } catch {
-      // fetch / 解析失败回落空，不报错（面板显示空清单而非「无法读取插件」）
-      return { ok: true, value: { entries: [] } }
-    }
+  /**
+   * 返回官方装配的完整插件清单：host 插件（base 78 + web host 17）+ client
+   * 浏览器模块（boot-manifest 37）= 132 项。官方 Loader 树中已装配的插件标
+   * `enabled: true, fiberPhase: 'active'`；web 装配中 disabled 的行（hmr、
+   * skill-badge）标 `enabled: false, fiberPhase: null`，与官方
+   * PluginInventoryGateway 的投影一致。
+   */
+  function dshPluginInventoryList(): DshRpcResult {
+    const entries: DshPluginInventoryEntry[] = OFFICIAL_PLUGIN_ROSTER.map((p) => ({
+      entryId: p.id,
+      moduleName: p.moduleName,
+      enabled: !p.disabled,
+      fiberPhase: p.disabled ? null : 'active',
+    }))
+    return { ok: true, value: { entries } }
   }
 
   // ── goal.*（chrome.storage.local 真实持久化）──────────────────────
@@ -1275,9 +1371,10 @@ export default defineBackground(() => {
         }
       }
     },
-    // host.pickDirectory：工作区目录选择对话框；合法空值表示用户取消选择
-    // （对齐 hostPickDirectoryValueSchema：path 为 string|null）。
-    'host.pickDirectory': () => ({ ok: true, value: { path: null } }),
+    // host.pickDirectory：工作区目录选择对话框。浏览器无真实目录选择器，
+    // 返回默认虚拟路径 <dsh-in-web>（与 host.describe 的 cwd 一致），
+    // 让「选择目录 → 创建工作区」流程不被 null（用户取消）中断。
+    'host.pickDirectory': () => ({ ok: true, value: { path: '<dsh-in-web>' } }),
     // host.createDirectory：新建文件夹（对齐 hostCreateDirectoryValueSchema：
     // request { path, name }，value { path }）。不做真实 FS 创建，返回合成绝对路径
     // 即可让 UI 刷新目录；path/name 缺失时兜底 '/'，避免 UI 拿到非法路径。
@@ -1302,7 +1399,10 @@ export default defineBackground(() => {
     'workspace.create': dshWorkspaceCreate,
     'workspace.rename': dshWorkspaceRename,
     'workspace.delete': dshWorkspaceDelete,
-    'workspace.insertBefore': () => ({ ok: true, value: { workspaceIds: [DSH_WORKSPACE_ID] } }),
+    'workspace.insertBefore': async () => {
+      const records = await readWorkspaces()
+      return { ok: true, value: { workspaceIds: records.map((r) => r.workspaceId) } }
+    },
     'workspace.insertSessionBefore': dshWorkspaceInsertSessionBefore,
     'workspace.archiveSession': () => ({ ok: true, value: { archivedSessionIds: [] } }),
     'skill.list': dshSkillList,

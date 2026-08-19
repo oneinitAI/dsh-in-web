@@ -15,7 +15,6 @@
  */
 import { ConnectionController } from '@dsh-bridge/connection-controller';
 import type { ConnectionConfig, ConnectionSinks } from '@dsh-bridge/connection-controller';
-import { isLoopbackHostname } from '@dsh-bridge/loopback-hostname';
 import type { ResponseValue } from '@deepseek-ai/dsh-host-apiproxy/api';
 import { BridgeApiClient } from './bridge-api-client';
 import { createBridgeConnectionRpc } from './bridge-rpc';
@@ -76,7 +75,6 @@ export interface ConnectionHandle {
  * @param ctx - client cordis context.
  */
 export function apply(ctx: Context): void {
-  const pageLocation = typeof location === 'undefined' ? undefined : location
   const api = new BridgeApiClient()
   const rpc = createBridgeConnectionRpc()
   let started = false
@@ -95,7 +93,11 @@ export function apply(ctx: Context): void {
   }
   const handle: ConnectionHandle = {
     api,
-    isLoopback: pageLocation === undefined || isLoopbackHostname(pageLocation.hostname),
+    // 扩展内嵌 iframe 的 hostname 是扩展 ID（chrome-extension://<id>），
+    // isLoopbackHostname 会误判为非 loopback → settingsScope 走 memory 模式
+    // 完全不读写 RPC，导致插件配置/预设切换全部失效。扩展本身即本地宿主，
+    // 恒为 loopback（host 模式）。
+    isLoopback: true,
     hostDescription: {
       getSnapshot: () => description,
       subscribe: (listener) => {
