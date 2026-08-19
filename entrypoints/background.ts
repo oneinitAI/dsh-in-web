@@ -257,8 +257,19 @@ export default defineBackground(() => {
   /** persistSession 设置快照（每次 runStream 时读取）——开启则多轮复用 chat_session */
   let currentPersistSession = false
 
+  /**
+   * dsh 会话的流式回调面：runStream 把 agent loop 的流式事件 / 结束 / 失败
+   * 透传给调用方（dshSessionPrompt 据此实时回显 assistant/message）。
+   * round 从 1 开始，即 agent loop 的第几轮 LLM 调用。
+   */
+  interface StreamSink {
+    onEvent(ev: LlmStreamEvent, round: number): void
+    onFinish(): void
+    onError(error: string): void
+  }
+
   /** 流式聊天编排 —— agent loop 驱动（多轮工具调用回填） */
-  async function runStream(messages: Message[], reasoning: boolean, search: boolean) {
+  async function runStream(messages: Message[], reasoning: boolean, search: boolean, sink?: StreamSink) {
     currentReasoning = reasoning
     currentSearch = search
     currentPersistSession = (await getSettings()).persistSession
@@ -267,7 +278,9 @@ export default defineBackground(() => {
     try {
       await ws.init()
     } catch (err) {
-      pushBridgeEvent({ kind: 'error', error: `工作区初始化失败: ${err instanceof Error ? err.message : String(err)}` })
+      const message = `工作区初始化失败: ${err instanceof Error ? err.message : String(err)}`
+      pushBridgeEvent({ kind: 'error', error: message })
+      sink?.onError(message)
       return
     }
 
@@ -278,16 +291,20 @@ export default defineBackground(() => {
         tools,
         messages,
         maxTurns: 8,
-        onEvent: (ev) => {
+        onEvent: (ev, round) => {
           if (ev.kind === 'thinking') pushBridgeEvent({ kind: 'thinking', text: ev.text })
           else if (ev.kind === 'text') pushBridgeEvent({ kind: 'text', text: ev.text })
+          sink?.onEvent(ev, round)
         },
       })
       pushBridgeEvent({ kind: 'finish' })
       // 更新会话内消息历史供下一轮连续对话（保留 tool 结果）
       sessionMessages = result.messages
+      sink?.onFinish()
     } catch (err) {
-      pushBridgeEvent({ kind: 'error', error: err instanceof Error ? err.message : String(err) })
+      const message = err instanceof Error ? err.message : String(err)
+      pushBridgeEvent({ kind: 'error', error: message })
+      sink?.onError(message)
     }
   }
 
@@ -523,16 +540,229 @@ export default defineBackground(() => {
 
   /**
    * 虚拟会话注册表：session.create / session.fork 写入，session.list 读回。
+   * 每个会话额外持有事件日志（user/message + assistant/message 等），
+   * 供 session.history 读回（多轮上下文可见）以及 mux 流实时回显。
    * 让 UI 的 currentSession() 能取到 blank session 及 agentPreset ——
    * dsh-client-ui-agent-preset 的 select 逻辑依赖
    * `session.blank && session.agentPreset !== staged` 才 apply。
    */
+
+  // ── 会话事件类型（对齐 @deepseek-ai/dsh-session SessionEvent 的 wire 形状）──
+  // 仅声明本次回显核心用到的类型；事件必须带 surfaceOp:'append'，
+  // 否则客户端 isAppendSurfaceEvent 判定为假、不会渲染到会话视图。
+  interface DshContentBlockText {
+    type: 'text'
+    text: string
+  }
+  interface DshContentBlockReasoning {
+    type: 'reasoning'
+    text: string
+  }
+  type DshContentBlock = DshContentBlockText | DshContentBlockReasoning
+
+  /** 会话边界事件（turn/start、turn/end、step/start、step/end）——客户端按 turn/step 分组渲染 */
+  interface DshTurnStartEvent {
+    type: 'turn/start'
+    seq: number
+    time: number
+    data: { turn: number }
+  }
+  interface DshTurnEndEvent {
+    type: 'turn/end'
+    seq: number
+    time: number
+    data: { turn: number; reason: { kind: 'completed' } | { kind: 'error'; error: { message: string; code: string } } }
+  }
+  interface DshStepStartEvent {
+    type: 'step/start'
+    seq: number
+    time: number
+    data: { turn: number; step: number }
+  }
+  interface DshStepEndEvent {
+    type: 'step/end'
+    seq: number
+    time: number
+    data: { turn: number; step: number }
+  }
+
+  interface DshUserMessageEvent {
+    type: 'user/message'
+    seq: number
+    time: number
+    data: {
+      id: string
+      role: 'user'
+      content: DshContentBlockText[]
+      source: { kind: 'user' }
+    }
+    surfaceOp: 'append'
+  }
+
+  /** assistant/message：thinking + text 合并进 content blocks（方式 B 消息级回显） */
+  interface DshAssistantMessageEvent {
+    type: 'assistant/message'
+    seq: number
+    time: number
+    data: {
+      turn: number
+      step: number
+      message: {
+        id: string
+        role: 'assistant'
+        content: DshContentBlock[]
+        source: { kind: 'model'; provider: string; model: string }
+      }
+    }
+    surfaceOp: 'append'
+  }
+
+  type DshSessionEvent =
+    | DshTurnStartEvent
+    | DshTurnEndEvent
+    | DshStepStartEvent
+    | DshStepEndEvent
+    | DshUserMessageEvent
+    | DshAssistantMessageEvent
+
   interface VirtualSessionRecord {
     agentPreset?: string
-    blank: true
+    blank: boolean
     createdAt: number
+    /** 最后活动时间（session.list 的 updatedAt） */
+    updatedAt: number
+    /** 是否正在运行（session.list 的 running；host/session-status 据此推送） */
+    running: boolean
+    /** 事件日志（seq 连续递增，顺序即 seq 顺序） */
+    events: DshSessionEvent[]
+    /** 最后一个事件的 seq（空日志为 0） */
+    seq: number
+    /** 最近一次 prompt 使用的 turn 编号 */
+    turn: number
   }
+
   const virtualSessions = new Map<string, VirtualSessionRecord>()
+
+  function newVirtualSession(agentPreset?: string): VirtualSessionRecord {
+    const now = Date.now()
+    return {
+      ...(agentPreset !== undefined ? { agentPreset } : {}),
+      blank: true,
+      createdAt: now,
+      updatedAt: now,
+      running: false,
+      events: [],
+      seq: 0,
+      turn: 0,
+    }
+  }
+
+  /** 事件块转纯文本（只取 text 块；reasoning 不进模型上下文） */
+  function extractEventText(content: readonly DshContentBlock[]): string {
+    return content
+      .filter((block): block is DshContentBlockText => block.type === 'text')
+      .map((block) => block.text.trim())
+      .filter(Boolean)
+      .join('\n\n')
+  }
+
+  /**
+   * 从会话事件日志构建 runStream 的消息历史（多轮上下文）。
+   * assistant/message 同 (turn,step) 的多次增量更新只取最后一次（完整内容）。
+   */
+  function sessionHistoryMessages(rec: VirtualSessionRecord): Message[] {
+    const assistantLast = new Map<string, number>()
+    for (let i = 0; i < rec.events.length; i += 1) {
+      const event = rec.events[i]
+      if (event === undefined || event.type !== 'assistant/message') continue
+      assistantLast.set(`${event.data.turn}:${event.data.step}`, i)
+    }
+    const messages: Message[] = []
+    const addedAssistant = new Set<string>()
+    for (let i = 0; i < rec.events.length; i += 1) {
+      const event = rec.events[i]
+      if (event === undefined) continue
+      if (event.type === 'user/message') {
+        const text = extractEventText(event.data.content)
+        if (text) messages.push({ role: 'user', content: text })
+      } else if (event.type === 'assistant/message') {
+        const key = `${event.data.turn}:${event.data.step}`
+        if (assistantLast.get(key) !== i || addedAssistant.has(key)) continue
+        addedAssistant.add(key)
+        const text = extractEventText(event.data.message.content)
+        if (text) messages.push({ role: 'assistant', content: text })
+      }
+    }
+    return messages
+  }
+
+  // ── dsh 流帧（mux / host）与推送 ─────────────────────────────
+  // 客户端（BridgeApiClient.readStream）期望 `{ kind:'dsh-stream-frame',
+  // body: ServerRequest }`；ServerRequest.method 即帧自身的 type，
+  // payload 即帧本身（对齐 host fetch/handler.ts 的组装）。
+  interface DshMuxEventFrame {
+    type: 'session/event'
+    sessionId: string
+    event: DshSessionEvent
+  }
+  interface DshMuxSubscribedFrame {
+    type: 'session/subscribed'
+    sessionId: string
+    lastSeq: number
+  }
+  type DshMuxFrame = DshMuxEventFrame | DshMuxSubscribedFrame
+
+  interface DshHostStatusFrame {
+    type: 'host/session-status'
+    sessionId: string
+    running: boolean
+  }
+  interface DshHostAddedFrame {
+    type: 'host/session-added'
+    sessionId: string
+    blank: boolean
+    agentPreset?: string
+  }
+  type DshHostFrame = DshHostStatusFrame | DshHostAddedFrame
+
+  function pushDshStreamFrame(port: chrome.runtime.Port, frame: DshMuxFrame | DshHostFrame): void {
+    try {
+      port.postMessage({
+        kind: 'dsh-stream-frame',
+        body: {
+          type: 'server-request',
+          rpcId: `push-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          method: frame.type,
+          payload: frame,
+        },
+      })
+    } catch {
+      // 端口可能已断开，静默
+    }
+  }
+
+  /** 向所有已订阅 mux 的端口广播一帧 */
+  function broadcastMuxFrame(frame: DshMuxFrame): void {
+    for (const port of dshStreamPorts) {
+      if (dshStreamPortStreams.get(port) !== 'mux') continue
+      pushDshStreamFrame(port, frame)
+    }
+  }
+
+  /** 向所有已订阅 host 的端口广播一帧 */
+  function broadcastHostFrame(frame: DshHostFrame): void {
+    for (const port of dshStreamPorts) {
+      if (dshStreamPortStreams.get(port) !== 'host') continue
+      pushDshStreamFrame(port, frame)
+    }
+  }
+
+  /** 记录一个会话事件并广播到 mux 端口（seq 由调用方递增，保持连续） */
+  function appendSessionEvent(sessionId: string, rec: VirtualSessionRecord, event: DshSessionEvent): void {
+    rec.events.push(event)
+    rec.updatedAt = event.time
+    broadcastMuxFrame({ type: 'session/event', sessionId, event })
+  }
 
   /** 提取 session.prompt content 里的纯文本（text 类型 part） */
   function extractPromptText(content: unknown): string {
@@ -556,11 +786,9 @@ export default defineBackground(() => {
     const sessionId = typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : mintVirtualSessionId()
     // sessionCreateRequestSchema 的 agentPreset 可选：透传回 value（undefined 时省略，schema optional）
     const agentPreset = typeof p.agentPreset === 'string' && p.agentPreset ? p.agentPreset : undefined
-    virtualSessions.set(sessionId, {
-      ...(agentPreset !== undefined ? { agentPreset } : {}),
-      blank: true,
-      createdAt: Date.now(),
-    })
+    virtualSessions.set(sessionId, newVirtualSession(agentPreset))
+    // host 流：会话创建即推 host/session-added（blank 恒为 true，客户端在首个 running 翻转）
+    broadcastHostFrame({ type: 'host/session-added', sessionId, blank: true, ...(agentPreset !== undefined ? { agentPreset } : {}) })
     return {
       ok: true,
       value: {
@@ -574,16 +802,16 @@ export default defineBackground(() => {
   function dshSessionList(): DshRpcResult {
     const items = [...virtualSessions.entries()].map(([sessionId, rec]) => ({
       sessionId,
-      updatedAt: rec.createdAt,
-      running: false,
-      blank: true as const,
+      updatedAt: rec.updatedAt,
+      running: rec.running,
+      blank: rec.blank,
       ...(rec.agentPreset !== undefined ? { agentPreset: rec.agentPreset } : {}),
     }))
     return { ok: true, value: { items } }
   }
 
   function dshSessionPrompt(payload: unknown): DshRpcResult {
-    const p = (payload ?? {}) as { content?: unknown }
+    const p = (payload ?? {}) as { sessionId?: unknown; content?: unknown }
     const text = extractPromptText(p.content)
     if (!text) {
       return {
@@ -591,8 +819,177 @@ export default defineBackground(() => {
         error: { code: 'bad-request', message: 'session.prompt: empty text content', details: { issues: [] } },
       }
     }
-    // 复用现有 chat-stream 桥：SW runStream → sendToPage → content script（页面 origin）流式聊天
-    void runStream([{ role: 'user', content: text }], currentReasoning, currentSearch)
+    const sessionId = typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : mintVirtualSessionId()
+    let rec = virtualSessions.get(sessionId)
+    if (!rec) {
+      rec = newVirtualSession()
+      virtualSessions.set(sessionId, rec)
+    }
+    if (rec.running) {
+      // 已有流在跑：拒绝并发 prompt（UI 运行中禁用输入，仅防御）
+      return {
+        ok: false,
+        error: { code: 'busy', message: 'session.prompt: session is already running', details: {} },
+      }
+    }
+
+    // 1) 打开 turn + 记录并回显 user/message；blank 会话在首个 prompt 接受后翻转
+    rec.turn += 1
+    const turn = rec.turn
+    appendSessionEvent(sessionId, rec, {
+      type: 'turn/start',
+      seq: ++rec.seq,
+      time: Date.now(),
+      data: { turn },
+    })
+    const userEvent: DshUserMessageEvent = {
+      type: 'user/message',
+      seq: ++rec.seq,
+      time: Date.now(),
+      data: {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user' },
+      },
+      surfaceOp: 'append',
+    }
+    appendSessionEvent(sessionId, rec, userEvent)
+    if (rec.blank) rec.blank = false
+
+    // 2) 运行状态置真 + host 帧（session.list 与 sidebar 据此显示 running）
+    rec.running = true
+    broadcastHostFrame({ type: 'host/session-status', sessionId, running: true })
+
+    // 3) 多轮上下文：把该会话历史消息（含刚加入的 user）传给 runStream。
+    //    dsh 会话自带完整历史，web 侧不再复用旧 chat_session（避免服务端历史重复）。
+    const history = sessionHistoryMessages(rec)
+    currentSessionId = undefined
+
+    // 4) 订阅流式事件，边收边实时回显 assistant/message（方式 B：同 messageId
+    //    的增量更新会被客户端按 (turn,step) 原地替换，最终落一条完整消息）。
+    let currentRound = 0
+    let messageId = crypto.randomUUID()
+    let thinking = ''
+    let textSoFar = ''
+    let lastPush = 0
+
+    const buildContent = (): DshContentBlock[] => {
+      const content: DshContentBlock[] = []
+      if (thinking) content.push({ type: 'reasoning', text: thinking })
+      if (textSoFar) content.push({ type: 'text', text: textSoFar })
+      return content
+    }
+
+    const pushAssistantUpdate = (): void => {
+      const content = buildContent()
+      if (content.length === 0) return
+      const now = Date.now()
+      if (now - lastPush < 200) return
+      lastPush = now
+      const event: DshAssistantMessageEvent = {
+        type: 'assistant/message',
+        seq: ++rec.seq,
+        time: now,
+        data: {
+          turn,
+          step: Math.max(0, currentRound - 1),
+          message: {
+            id: messageId,
+            role: 'assistant',
+            content,
+            source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+          },
+        },
+        surfaceOp: 'append',
+      }
+      appendSessionEvent(sessionId, rec, event)
+    }
+
+    /** 结束当前 round：落一条完整 assistant/message + step/end（须已有 step/start） */
+    const finalizeRound = (): void => {
+      if (currentRound <= 0) return
+      const content = buildContent()
+      if (content.length > 0) {
+        const event: DshAssistantMessageEvent = {
+          type: 'assistant/message',
+          seq: ++rec.seq,
+          time: Date.now(),
+          data: {
+            turn,
+            step: Math.max(0, currentRound - 1),
+            message: {
+              id: messageId,
+              role: 'assistant',
+              content,
+              source: { kind: 'model', provider: 'deepseek', model: 'deepseek-chat' },
+            },
+          },
+          surfaceOp: 'append',
+        }
+        appendSessionEvent(sessionId, rec, event)
+      }
+      appendSessionEvent(sessionId, rec, {
+        type: 'step/end',
+        seq: ++rec.seq,
+        time: Date.now(),
+        data: { turn, step: Math.max(0, currentRound - 1) },
+      })
+    }
+
+    /** 收尾：running 复位 + host 帧；重复调用幂等 */
+    let settled = false
+    const finishRunning = (): void => {
+      if (settled) return
+      settled = true
+      if (rec.running) {
+        rec.running = false
+        broadcastHostFrame({ type: 'host/session-status', sessionId, running: false })
+      }
+    }
+
+    void runStream(history, currentReasoning, currentSearch, {
+      onEvent: (ev, round) => {
+        if (round !== currentRound) {
+          // 进入新一轮（工具调用场景才有第 2+ 轮）：上一轮结束，新一轮打开
+          if (currentRound > 0) finalizeRound()
+          currentRound = round
+          messageId = crypto.randomUUID()
+          thinking = ''
+          textSoFar = ''
+          lastPush = 0
+          appendSessionEvent(sessionId, rec, {
+            type: 'step/start',
+            seq: ++rec.seq,
+            time: Date.now(),
+            data: { turn, step: round - 1 },
+          })
+        }
+        if (ev.kind === 'thinking' && ev.text) thinking += ev.text
+        else if (ev.kind === 'text' && ev.text) textSoFar += ev.text
+        pushAssistantUpdate()
+      },
+      onFinish: () => {
+        finalizeRound()
+        appendSessionEvent(sessionId, rec, {
+          type: 'turn/end',
+          seq: ++rec.seq,
+          time: Date.now(),
+          data: { turn, reason: { kind: 'completed' } },
+        })
+        finishRunning()
+      },
+      onError: (error) => {
+        finalizeRound()
+        appendSessionEvent(sessionId, rec, {
+          type: 'turn/end',
+          seq: ++rec.seq,
+          time: Date.now(),
+          data: { turn, reason: { kind: 'error', error: { message: error, code: 'UNKNOWN' } } },
+        })
+        finishRunning()
+      },
+    })
     return { ok: true, value: { accepted: true } }
   }
 
@@ -625,7 +1022,8 @@ export default defineBackground(() => {
   function dshSessionFork(): DshRpcResult {
     // 虚拟子会话（无持久化，fork 即派发一个新的会话 id；同时写入注册表供 session.list 读回）
     const sessionId = mintVirtualSessionId()
-    virtualSessions.set(sessionId, { blank: true, createdAt: Date.now() })
+    virtualSessions.set(sessionId, newVirtualSession())
+    broadcastHostFrame({ type: 'host/session-added', sessionId, blank: true })
     return { ok: true, value: { sessionId } }
   }
 
@@ -1388,7 +1786,22 @@ export default defineBackground(() => {
     'session.list': dshSessionList,
     'session.search': () => ({ ok: true, value: { items: [], hasMore: false } }),
     'session.create': dshSessionCreate,
-    'session.history': () => ({ ok: true, value: { events: [], hasMore: false } }),
+    'session.history': (payload) => {
+      const p = (payload ?? {}) as { sessionId?: unknown; beforeSeq?: unknown; maxMessages?: unknown }
+      const sessionId = typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : ''
+      const rec = sessionId ? virtualSessions.get(sessionId) : undefined
+      if (!rec) return { ok: true, value: { events: [], hasMore: false } }
+      // beforeSeq 回退分页 / maxMessages 从尾部往前取（默认全量）；返回按 seq 升序
+      const beforeSeq = typeof p.beforeSeq === 'number' && Number.isFinite(p.beforeSeq) ? p.beforeSeq : undefined
+      const maxMessages =
+        typeof p.maxMessages === 'number' && Number.isFinite(p.maxMessages) && p.maxMessages > 0
+          ? Math.floor(p.maxMessages)
+          : rec.events.length
+      const page = beforeSeq === undefined ? rec.events : rec.events.filter((event) => event.seq < beforeSeq)
+      const start = Math.max(0, page.length - maxMessages)
+      const events = page.slice(start).map((event) => ({ event }))
+      return { ok: true, value: { events, hasMore: start > 0 } }
+    },
     'session.models': dshSessionModels,
     'session.selectModel': dshSessionSelectModel,
     'session.rename': dshSessionRename,
@@ -1533,8 +1946,10 @@ export default defineBackground(() => {
     return handleDshRpc(message)
   })
 
-  // ── dsh 流（mux / host）骨架：保持端口打开、响应订阅、断线清理 ──
+  // ── dsh 流（mux / host）：保持端口打开、响应订阅、广播帧、断线清理 ──
   const dshStreamPorts = new Set<chrome.runtime.Port>()
+  /** 每个端口订阅的流类型（mux 收 session/event，host 收 session-status 等） */
+  const dshStreamPortStreams = new Map<chrome.runtime.Port, 'mux' | 'host'>()
 
   interface DshStreamSubscribe {
     readonly kind: 'dsh-stream-subscribe'
@@ -1547,16 +1962,29 @@ export default defineBackground(() => {
     return m.kind === 'dsh-stream-subscribe' && (m.stream === 'mux' || m.stream === 'host')
   }
 
+  /** mux 订阅基线：为每个已注册会话补发 session/subscribed（lastSeq = 最后事件 seq，空日志 -1） */
+  function replayMuxBaseline(port: chrome.runtime.Port): void {
+    for (const [sessionId, rec] of virtualSessions) {
+      pushDshStreamFrame(port, {
+        type: 'session/subscribed',
+        sessionId,
+        lastSeq: rec.events.length - 1,
+      })
+    }
+  }
+
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== 'dsh-stream') return
     dshStreamPorts.add(port)
     port.onMessage.addListener((msg: unknown) => {
       if (!isDshStreamSubscribe(msg)) return
-      // 骨架阶段不推送任何 frame（NOT-IMPLEMENTED frame 可能破坏客户端 gap 检测），仅保持端口打开
+      dshStreamPortStreams.set(port, msg.stream)
       port.postMessage({ kind: 'dsh-stream-ok', body: { stream: msg.stream } })
+      if (msg.stream === 'mux') replayMuxBaseline(port)
     })
     port.onDisconnect.addListener(() => {
       dshStreamPorts.delete(port)
+      dshStreamPortStreams.delete(port)
     })
   })
 })
