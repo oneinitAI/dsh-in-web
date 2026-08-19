@@ -41,6 +41,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   let finalText = ''
   let turns = 0
 
+  const emit = (ev: LlmStreamEvent): void => opts.onEvent?.(ev, turns)
+
   while (turns < maxTurns) {
     turns++
     // round 1: stream the LLM
@@ -65,7 +67,18 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
     // round n: execute each tool, append results, loop
     for (const call of calls) {
+      const callId = mintToolCallId()
+      const argsRaw = JSON.stringify(call.args)
+      emit({ kind: 'tool_call', callId, name: call.name, arguments: argsRaw })
       const result = await executeToolCall({ tools: opts.tools }, call)
+      emit({
+        kind: 'tool_result',
+        callId,
+        name: call.name,
+        arguments: argsRaw,
+        output: result.ok ? result.output ?? '' : result.error ?? 'unknown error',
+        ok: result.ok,
+      })
       const payload = result.ok
         ? `<tool_result name="${call.name}">\n${result.output ?? ''}\n</tool_result>`
         : `<tool_result name="${call.name}" error="true">\n${result.error ?? 'unknown error'}\n</tool_result>`
@@ -74,4 +87,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   }
 
   return { finalText, messages: history, turns }
+}
+
+/** 生成工具调用唯一 ID（SW / node 环境均可用；与 tool/result 的 source.callId 配对） */
+function mintToolCallId(): string {
+  const c = globalThis.crypto
+  if (typeof c?.randomUUID === 'function') return c.randomUUID()
+  return `tool-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }

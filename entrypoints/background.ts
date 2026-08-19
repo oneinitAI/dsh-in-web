@@ -733,6 +733,44 @@ export default defineBackground(() => {
     surfaceOp: 'append'
   }
 
+  /** tool-result 块（对齐 @deepseek-ai/dsh-session toolResultBlock schema） */
+  interface DshToolResultBlock {
+    type: 'tool-result'
+    toolCallId: string
+    content: DshContentBlockText[]
+    isError: boolean
+  }
+
+  /** tool/call：agent 决定调用工具（工具名 + JSON 参数） */
+  interface DshToolCallEvent {
+    type: 'tool/call'
+    seq: number
+    time: number
+    data: {
+      turn: number
+      step: number
+      callId: string
+      name: string
+      arguments: string
+    }
+  }
+
+  /** tool/result：工具执行结果以 user 消息（source kind:'tool'）回填，callId 与 tool/call 配对 */
+  interface DshToolResultEvent {
+    type: 'tool/result'
+    seq: number
+    time: number
+    data: {
+      turn: number
+      step: number
+      message: {
+        role: 'user'
+        content: DshToolResultBlock[]
+        source: { kind: 'tool'; callId: string }
+      }
+    }
+  }
+
   type DshSessionEvent =
     | DshTurnStartEvent
     | DshTurnEndEvent
@@ -740,6 +778,8 @@ export default defineBackground(() => {
     | DshStepEndEvent
     | DshUserMessageEvent
     | DshAssistantMessageEvent
+    | DshToolCallEvent
+    | DshToolResultEvent
 
   interface VirtualSessionRecord {
     agentPreset?: string
@@ -1135,9 +1175,50 @@ export default defineBackground(() => {
             data: { turn, step: round - 1 },
           })
         }
-        if (ev.kind === 'thinking' && ev.text) thinking += ev.text
-        else if (ev.kind === 'text' && ev.text) textSoFar += ev.text
-        pushAssistantUpdate()
+        if (ev.kind === 'thinking' && ev.text) {
+          thinking += ev.text
+          pushAssistantUpdate()
+        } else if (ev.kind === 'text' && ev.text) {
+          textSoFar += ev.text
+          pushAssistantUpdate()
+        } else if (ev.kind === 'tool_call') {
+          // 模型决定调用工具 → tool/call（callId 与随后的 tool/result 配对）
+          appendSessionEvent(sessionId, rec, {
+            type: 'tool/call',
+            seq: ++rec.seq,
+            time: Date.now(),
+            data: {
+              turn,
+              step: Math.max(0, currentRound - 1),
+              callId: ev.callId,
+              name: ev.name,
+              arguments: ev.arguments,
+            },
+          })
+        } else if (ev.kind === 'tool_result') {
+          // 工具执行结果 → tool/result（user 消息 + source kind:'tool'，对齐官方 schema）
+          appendSessionEvent(sessionId, rec, {
+            type: 'tool/result',
+            seq: ++rec.seq,
+            time: Date.now(),
+            data: {
+              turn,
+              step: Math.max(0, currentRound - 1),
+              message: {
+                role: 'user',
+                content: [
+                  {
+                    type: 'tool-result',
+                    toolCallId: ev.callId,
+                    content: [{ type: 'text', text: ev.output }],
+                    isError: !ev.ok,
+                  },
+                ],
+                source: { kind: 'tool', callId: ev.callId },
+              },
+            },
+          })
+        }
       },
       onFinish: () => {
         finalizeRound()

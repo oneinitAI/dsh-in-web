@@ -12,11 +12,13 @@ import type { Workspace } from '@/utils/fs/workspace'
 import type { SkillMeta } from '@/utils/skills/skill'
 
 /** ctx.llm — stream completion through the deepseek web bridge. */
-export interface LlmStreamEvent {
-  kind: 'thinking' | 'text' | 'finish' | 'error'
-  text?: string
-  error?: string
-}
+export type LlmStreamEvent =
+  | { kind: 'thinking'; text?: string }
+  | { kind: 'text'; text?: string }
+  | { kind: 'finish' }
+  | { kind: 'error'; error?: string }
+  | { kind: 'tool_call'; callId: string; name: string; arguments: string }
+  | { kind: 'tool_result'; callId: string; name: string; arguments: string; output: string; ok: boolean }
 
 export interface BrowserHostSurface {
   fs: Workspace
