@@ -15,6 +15,11 @@ export default defineConfig({
       'unlimitedStorage',
     ],
     host_permissions: ['https://chat.deepseek.com/*', '<all_urls>'],
+    // 放行 blob: script —— 「插件」页添加的用户插件 bundle 由 dsh-web 内的
+    // user-plugins.js 转成 blob URL 追加进 boot manifest 后经 <script src> 加载。
+    content_security_policy: {
+      extension_pages: "script-src 'self' blob:; object-src 'self';",
+    },
     web_accessible_resources: [
       {
         // 允许页面 iframe 加载 dsh 面板（dsh-ui.content.ts 注入）。

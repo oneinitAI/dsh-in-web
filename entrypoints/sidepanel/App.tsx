@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 import type { Message } from '@/utils/bridge/protocol'
 import type { BridgeEventMessage } from '@/utils/messages'
 import { buildFileTree, filterTree, type TreeNode } from '@/utils/ui/filetree'
@@ -8,6 +8,14 @@ import { saveDirectoryHandle } from '@/utils/fs/dir-handles'
 import { parseSkillMd, type Skill } from '@/utils/skills/skill'
 import { interpolate, parseSections, renderSections, type PromptSection } from '@/utils/prompts/prompt'
 import { getSettings, patchSettings, type DshSettings } from '@/utils/settings/settings'
+import {
+  addUserPlugin,
+  extractPluginId,
+  isPluginBundle,
+  readUserPlugins,
+  removeUserPlugin,
+  type UserPlugin,
+} from '@/utils/plugin/user-plugins'
 import { TerminalView } from './TerminalView'
 
 /**
@@ -38,7 +46,7 @@ interface ChatTurn {
 
 const INITIAL: PageState = { authPresent: false, url: '', connected: false }
 
-type Tab = 'chat' | 'files' | 'skills' | 'prompts' | 'terminal' | 'settings'
+type Tab = 'chat' | 'files' | 'skills' | 'prompts' | 'terminal' | 'plugins' | 'settings'
 
 const TAB_LABELS: Record<Tab, string> = {
   chat: '会话',
@@ -46,6 +54,7 @@ const TAB_LABELS: Record<Tab, string> = {
   skills: '技能',
   prompts: '提示词',
   terminal: '终端',
+  plugins: '插件',
   settings: '设置',
 }
 
@@ -95,6 +104,12 @@ export function App() {
 
   // ── 设置（持久化）────────────────────────
   const [settings, setSettings] = useState<DshSettings | null>(null)
+
+  // ── 用户插件管理 ────────────────────────
+  const [userPlugins, setUserPlugins] = useState<UserPlugin[]>([])
+  const [pluginSrc, setPluginSrc] = useState('')
+  const [pluginName, setPluginName] = useState('')
+  const [pluginMsg, setPluginMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
 
   // ── 真实文件夹工作区（showDirectoryPicker）────────────────
   const [wsBusy, setWsBusy] = useState(false)
@@ -230,6 +245,12 @@ export function App() {
     })
   }, [tab])
 
+  // 进入插件标签时拉取已安装的用户插件
+  useEffect(() => {
+    if (tab !== 'plugins') return
+    void readUserPlugins().then(setUserPlugins)
+  }, [tab])
+
   // 提示词实时渲染
   useEffect(() => {
     try {
@@ -276,6 +297,47 @@ export function App() {
     setFileContent({ path: node.path, content: r.content ?? '' })
   }
 
+  // ── 用户插件：文件选择读取 bundle 源码 ─────────────
+  async function onPickPluginFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    const text = await file.text()
+    setPluginSrc(text)
+    setPluginName(extractPluginId(text) ?? '')
+    setPluginMsg(null)
+  }
+
+  /** 添加插件：校验 bundle 格式后持久化（localStorage + chrome.storage 双写） */
+  async function addPlugin() {
+    const code = pluginSrc.trim()
+    if (!code) {
+      setPluginMsg({ kind: 'err', text: '请先选择插件文件或粘贴 bundle 源码' })
+      return
+    }
+    if (!isPluginBundle(code)) {
+      setPluginMsg({ kind: 'err', text: '不是合法的插件 bundle：需要 window.__ModuleLoader__.load({ id, factory }) 格式' })
+      return
+    }
+    const id = extractPluginId(code)
+    if (!id) {
+      setPluginMsg({ kind: 'err', text: '无法从 bundle 提取插件 id' })
+      return
+    }
+    setPluginName(id)
+    const next = await addUserPlugin(id, code)
+    setUserPlugins(next)
+    setPluginSrc('')
+    setPluginMsg({ kind: 'ok', text: `已添加 ${id} —— 重新加载 dsh 页面（刷新 chat.deepseek.com 或重开 dsh 模式）后生效` })
+  }
+
+  /** 删除插件：双写移除后提示刷新生效 */
+  async function removePlugin(id: string) {
+    const next = await removeUserPlugin(id)
+    setUserPlugins(next)
+    setPluginMsg({ kind: 'ok', text: `已移除 ${id} —— 重新加载 dsh 页面后生效` })
+  }
+
   const visibleTree = filterTree(tree, treeQuery)
 
   function renderTree(nodes: TreeNode[], depth: number): ReactNode {
@@ -310,7 +372,7 @@ export function App() {
       </header>
 
       <nav className="tabs">
-        {(['chat', 'files', 'skills', 'prompts', 'terminal', 'settings'] as const).map((t) => (
+        {(['chat', 'files', 'skills', 'prompts', 'terminal', 'plugins', 'settings'] as const).map((t) => (
           <button key={t} className={`tab ${tab === t ? 'tab--active' : ''}`} onClick={() => setTab(t)}>
             {TAB_LABELS[t]}
           </button>
@@ -459,6 +521,62 @@ export function App() {
       )}
 
       {tab === 'terminal' && <TerminalView />}
+
+      {tab === 'plugins' && (
+        <div className="plugins">
+          <p className="settings__hint">
+            添加 dsh client 插件 bundle（与官方 client.js 同格式：<code>{`window.__ModuleLoader__.load({ id, factory })`}</code>）。
+            选择或粘贴 bundle 源码后点「添加」；保存后<strong>重新加载 dsh 页面</strong>（刷新 chat.deepseek.com 或重开 dsh 模式）生效。
+          </p>
+
+          <div className="plugins__add">
+            <input
+              type="file"
+              accept=".js,text/javascript"
+              className="plugins__file"
+              onChange={(e) => void onPickPluginFile(e)}
+              title="选择插件 bundle 文件（.js）"
+            />
+            <textarea
+              className="plugins__src"
+              placeholder="或粘贴 bundle 源码…"
+              rows={6}
+              value={pluginSrc}
+              onChange={(e) => {
+                setPluginSrc(e.target.value)
+                setPluginName(extractPluginId(e.target.value) ?? '')
+              }}
+            />
+            {pluginName && (
+              <div className="plugins__detected">识别到插件 id：<code>{pluginName}</code></div>
+            )}
+            <button className="btn btn--primary" onClick={() => void addPlugin()}>
+              添加插件
+            </button>
+            {pluginMsg && (
+              <div className={`ws-note ${pluginMsg.kind === 'ok' ? 'ws-note--ok' : 'ws-note--err'}`}>
+                {pluginMsg.text}
+              </div>
+            )}
+          </div>
+
+          <div className="plugins__list">
+            {userPlugins.length === 0 ? (
+              <div className="chat__empty">（尚未添加用户插件）</div>
+            ) : (
+              userPlugins.map((p) => (
+                <div key={p.id} className="plugin-row">
+                  <span className="plugin-row__id">{p.id}</span>
+                  <span className="plugin-row__meta">{new Date(p.addedAt).toLocaleString()}</span>
+                  <button className="btn btn--danger btn--small" onClick={() => void removePlugin(p.id)}>
+                    移除
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       {tab === 'settings' && (
         <div className="settings">
