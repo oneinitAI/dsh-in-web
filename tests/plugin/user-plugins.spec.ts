@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * user-plugins.ts —— 「插件」页数据层（构建期合并方案）的 TDD 测试。
  * 覆盖：id 提取 / bundle 校验 / user-plugins.json 清单解析 / 类型守卫过滤。
  * listBuiltInUserPlugins() 依赖 chrome.runtime + fetch，测试仅覆盖纯函数部分。

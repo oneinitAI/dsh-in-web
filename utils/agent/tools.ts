@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * Tool registry builders — map the browser host surface into DSML tools
  * consumable by the agent loop (ctx.fs → read/write/edit/list tools,
  * skill library → per-skill tools). Pure + testable.

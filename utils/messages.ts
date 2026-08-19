@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * 共享消息协议：MAIN world ↔ isolated bridge ↔ SW ↔ Side Panel 全链路。
  * 独立于各运行时，纯类型 + 常量，可在四端安全 import。
  */

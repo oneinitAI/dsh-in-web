@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * protocol.ts —— 端点/请求头/请求体/消息拼装的 TDD 测试。
  * 契约来源：yinshuo-thu/deepseek-cli 的 dswebClient.ts（ds2api Go 参考的镜像）。
  */

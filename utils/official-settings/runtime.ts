@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * Official dsh settings runtime — Service-Worker-only integration point.
  *
  * The real official `SettingsProvider` (bundled from deepseek-harness by

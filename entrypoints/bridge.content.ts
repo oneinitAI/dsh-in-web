@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * isolated world bridge —— MAIN world 与扩展后台之间的桥。
  * 职责（Wave 1.5 起扩展为 LLM 网络宿主）：
  * 1. 监听 MAIN world 的 window.postMessage（up 方向）→ 转发给 SW（chrome.runtime.sendMessage）

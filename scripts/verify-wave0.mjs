@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * Wave 0 SURFACE 验证（CDP 直连版）：
  * 直接以子进程启动 chrome.exe（完全控制命令行，绕开 Playwright 默认 --disable-extensions），
  * 通过 --remote-debugging-port + DevToolsActivePort 连接。

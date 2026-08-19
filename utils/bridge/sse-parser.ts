@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * chat.deepseek.com SSE chunk 解析器。
  * 契约来源：yinshuo-thu/deepseek-cli 的 dswebClient.ts parseDeepSeekChunk
  * （ds2api Go 参考的镜像），覆盖两种 chunk 形态 + 跳过路径 + fragments。

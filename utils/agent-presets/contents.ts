@@ -1,3 +1,15 @@
+/**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 // AUTO-GENERATED from deepseek-harness apps/cli/config/agent-presets/
 //   {standard,code,minimal,cordis}/agent.cordis.yml (逐字节完整保留，含注释)
 // agentPreset.read 返回这些内容作为官方预设的 composition。

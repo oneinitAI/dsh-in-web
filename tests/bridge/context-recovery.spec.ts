@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * context-recovery.ts —— 扩展上下文失效（Extension context invalidated）恢复逻辑测试。
  * 覆盖：错误识别（Error / lastError 形状）、防抖、协议白名单（仅 chrome-extension: 页面重载）。
  */

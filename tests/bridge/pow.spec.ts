@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * DeepSeekHashV1 / PoW 求解器的 TDD 测试。
  * 测试向量来自 CJackHwang/ds2api 的 pow/deepseek_pow_test.go，
  * 其注释明确：向量由直接调用 DeepSeek 官方 WASM 生成。

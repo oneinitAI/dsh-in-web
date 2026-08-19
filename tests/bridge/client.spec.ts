@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * client.ts —— DeepSeekWebClient 的 TDD 测试。
  * 用可注入 fetcher mock 网络层，覆盖：SSE 流式、主动 PoW、错误类型、会话创建、accessToken 换取。
  * 流程对齐 OmniRoute：currentUser 换 token → create_session → create_pow_challenge → completion。

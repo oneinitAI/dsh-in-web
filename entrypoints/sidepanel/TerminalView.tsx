@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * TerminalView — xterm.js + whitelist shell simulator（W4.3 终端 MVP）。
  * 直接在 side panel 内实例化 Workspace（与 SW 共享同一扩展 IndexedDB），
  * 无需 SW 桥接。安全边界：白名单命令 + 元字符注入拒绝（shell.ts）。

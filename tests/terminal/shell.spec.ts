@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * terminal/shell.ts — 白名单 shell simulator 的 TDD 测试。
  * 覆盖：命令解析（引号/注入拒绝）、白名单命令（help/pwd/ls/cat/write/echo）、
  * 相对路径解析 + 防穿越、未知命令拒绝。

@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * Extension-context recovery (shared by bridge-api-client.ts and bridge-rpc.ts).
  *
  * Chrome MV3 扩展被 reload / 更新后，旧页面（sidepanel 自身、或 dsh-ui 注入的

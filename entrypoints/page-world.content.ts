@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * MAIN world content script —— 与 chat.deepseek.com 页面共享 window 上下文。
  * 职责（Wave 0：骨架链路；Wave 1：fetch 拦截 + SSE + userToken）：
  * 1. 注入完成 → window.postMessage 上报 page-ready（含登录态探测）

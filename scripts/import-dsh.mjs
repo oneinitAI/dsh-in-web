@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * Import the dsh web frontend (shell + client plugin bundles) from a local
  * deepseek-harness checkout into public/dsh-web/.
  *
@@ -16,6 +28,7 @@
  *
  * Run: node scripts/import-dsh.mjs  (from the repo root)
  */
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   cp, mkdir, readFile, readdir, rm, writeFile,
@@ -156,6 +169,7 @@ async function main() {
 
   // 3. Scan every workspace package for a `dsh.client` declaration.
   const entries = []
+  let connectionDecl = null
   const dirs = await findPackageJsonDirs(HARNESS_PACKAGES)
   for (const dir of dirs) {
     const pkgPath = join(dir, 'package.json')
@@ -170,7 +184,12 @@ async function main() {
     const id = pkg.name
     if (typeof id !== 'string') continue
     if (id === '@deepseek-ai/dsh-client-connection') {
-      console.log('[skip] @deepseek-ai/dsh-client-connection (replaced by custom bridge bundle)')
+      // 官方 bundle 连本地 harness（HTTP/WebSocket），浏览器扩展不可用。
+      // 自定义 bridge bundle 由 build-connection-bridge.mjs 生成（见下方 step 4）。
+      // 这里仅记录其声明（inject / immediately），待官方 bundle 扫描完成后
+      // 重建 bridge bundle 并登记 entry，保证 boot-manifest 含 connection 服务。
+      connectionDecl = decl
+      console.log('[skip] @deepseek-ai/dsh-client-connection (replaced by custom bridge bundle, rebuilt below)')
       continue
     }
     // 浏览器扩展环境不适用的插件，剔除（避免加载失败/冲突/刷屏）：
@@ -205,6 +224,32 @@ async function main() {
       immediately: decl.immediately === true,
     })
     console.log(`[import-dsh] bundle ${id} (${rev}, imm=${decl.immediately === true})`)
+  }
+
+  // 3.5 Rebuild the custom connection bridge bundle (official dsh-client-connection
+  //     connects to a local harness over HTTP/WebSocket — unavailable in-browser;
+  //     build-connection-bridge.mjs replaces it with a chrome.runtime bridge) and
+  //     register it first in the manifest so dependent plugins resolve it.
+  if (connectionDecl) {
+    console.log('[import-dsh] building custom connection bridge bundle...')
+    execFileSync(process.execPath, [join(HERE, 'build-connection-bridge.mjs')], {
+      cwd: REPO_ROOT,
+      stdio: 'inherit',
+    })
+    const bridgePath = join(OUT_PLUGINS, '@deepseek-ai', 'dsh-client-connection', 'client.js')
+    const bridgeContent = await readFile(bridgePath, 'utf8').catch(() => null)
+    if (bridgeContent === null) {
+      throw new Error('[import-dsh] connection bridge bundle missing after build — cannot boot without connection service')
+    }
+    const rev = shortHash(bridgeContent)
+    entries.unshift({
+      id: '@deepseek-ai/dsh-client-connection',
+      url: `./plugins/@deepseek-ai/dsh-client-connection/client.js?rev=${rev}`,
+      rev,
+      inject: Array.isArray(connectionDecl.inject) ? connectionDecl.inject : [],
+      immediately: connectionDecl.immediately === true,
+    })
+    console.log(`[import-dsh] connection bridge registered (${rev}, imm=${connectionDecl.immediately === true})`)
   }
 
   // 4. Merge user plugins from user-plugins/ (build-time, CSP-safe) and emit

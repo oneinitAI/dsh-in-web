@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * 插件设置 —— chrome.storage.local 持久化，全端（SW / content script / Side Panel）共享。
  * 读：getSettings()（始终与默认值合并，防字段缺失）；写：patchSettings(partial)。
  * 变更订阅：subscribeSettings(cb)，storage.onChanged 驱动，任何端写入都会通知。

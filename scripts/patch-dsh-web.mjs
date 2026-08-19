@@ -1,4 +1,16 @@
 /**
+ * dsh-in-web — DeepSeek Harness (dsh) in the browser.
+ *
+ * This file embeds/adapts code from deepseek-ai/DeepSeek-Harness (dsh),
+ * distributed under the MIT License.
+ *
+ * Copyright (c) 2026 DeepSeek (dsh / DeepSeek-Harness)
+ * Copyright (c) 2026 oneinitAI
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/**
  * patch-dsh-web.mjs —— 对同步来的官方 dsh-web 产物做 CSP 兼容 patch。
  *
  * 背景：dsh 官方 shell 是 Electron 产物（无 CSP），index bundle 模块顶层就有
