@@ -3,10 +3,26 @@ import type { Message } from '@/utils/bridge/protocol'
 import type { BridgeEventMessage } from '@/utils/messages'
 import { buildFileTree, filterTree, type TreeNode } from '@/utils/ui/filetree'
 import type { FsEntry } from '@/utils/fs/workspace'
+import { realDirPath, workspaceIdFromPath } from '@/utils/fs/workspace'
+import { saveDirectoryHandle } from '@/utils/fs/dir-handles'
 import { parseSkillMd, type Skill } from '@/utils/skills/skill'
 import { interpolate, parseSections, renderSections, type PromptSection } from '@/utils/prompts/prompt'
 import { getSettings, patchSettings, type DshSettings } from '@/utils/settings/settings'
 import { TerminalView } from './TerminalView'
+
+/**
+ * showDirectoryPicker 不在 TS 标准 lib.dom 中（File System Access API 实验特性），
+ * 局部声明最小签名，避免 any。handle 类型 FileSystemDirectoryHandle 由 lib.dom 提供。
+ */
+declare global {
+  interface Window {
+    showDirectoryPicker(options?: {
+      id?: string
+      mode?: 'read' | 'readwrite'
+      startIn?: string
+    }): Promise<FileSystemDirectoryHandle>
+  }
+}
 
 interface PageState {
   authPresent: boolean
@@ -80,6 +96,11 @@ export function App() {
   // ── 设置（持久化）────────────────────────
   const [settings, setSettings] = useState<DshSettings | null>(null)
 
+  // ── 真实文件夹工作区（showDirectoryPicker）────────────────
+  const [wsBusy, setWsBusy] = useState(false)
+  const [wsInfo, setWsInfo] = useState<string | null>(null)
+  const [wsError, setWsError] = useState<string | null>(null)
+
   useEffect(() => {
     void getSettings().then(setSettings)
   }, [])
@@ -95,6 +116,46 @@ export function App() {
   async function toggleSetting<K extends keyof DshSettings>(key: K, value: DshSettings[K]) {
     const next = await patchSettings({ [key]: value })
     setSettings(next)
+  }
+
+  /**
+   * 「打开文件夹建立工作区」：showDirectoryPicker 必须由用户手势直接触发
+   * （按钮 onClick），SW 无法弹出选择器，因此这里：
+   * 1. picker 选真实文件夹 → 2. handle 存 IndexedDB（key = workspaceId，同源共享）
+   * → 3. 通知 SW 建工作区记录（SW 从 IndexedDB 恢复 handle 供真实读写）。
+   */
+  async function openFolderWorkspace() {
+    setWsError(null)
+    setWsInfo(null)
+    let handle: FileSystemDirectoryHandle
+    try {
+      handle = await window.showDirectoryPicker({ mode: 'readwrite' })
+    } catch {
+      // 用户取消 / 环境不支持：静默回到当前状态
+      return
+    }
+    const name = handle.name
+    const path = realDirPath(name)
+    const workspaceId = workspaceIdFromPath(path)
+    setWsBusy(true)
+    try {
+      await saveDirectoryHandle(workspaceId, handle)
+      const resp = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+        chrome.runtime.sendMessage(
+          { topic: 'panel-query', payload: { cmd: 'create-real-workspace', path, title: name } },
+          (r: unknown) => resolve((r as { ok: boolean; error?: string }) ?? { ok: false }),
+        )
+      })
+      if (resp.ok) {
+        setWsInfo(`工作区「${name}」已建立（${path}），可在 dsh 界面的工作区列表切换到它`)
+      } else {
+        setWsError(resp.error ?? '建立工作区失败')
+      }
+    } catch (err) {
+      setWsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setWsBusy(false)
+    }
   }
 
   useEffect(() => {
@@ -405,6 +466,22 @@ export function App() {
             <div className="chat__empty">加载设置中…</div>
           ) : (
             <>
+              <div className="settings__group">
+                <h3 className="settings__group-title">工作区</h3>
+                <button
+                  className="btn btn--primary"
+                  onClick={() => void openFolderWorkspace()}
+                  disabled={wsBusy}
+                >
+                  {wsBusy ? '建立中…' : '打开文件夹建立工作区'}
+                </button>
+                <p className="settings__hint">
+                  选择本地真实文件夹（File System Access API），建立后该工作区映射到真实目录，可读写真实文件。
+                </p>
+                {wsInfo && <div className="ws-note ws-note--ok">{wsInfo}</div>}
+                {wsError && <div className="ws-note ws-note--err">{wsError}</div>}
+              </div>
+
               <div className="settings__group">
                 <h3 className="settings__group-title">页面注入</h3>
                 <label className="setting-row">

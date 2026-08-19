@@ -7,6 +7,16 @@
  * Backed by IndexedDB (fake-indexeddb in tests).
  */
 
+/**
+ * TS 标准 lib.dom 的 FileSystemDirectoryHandle 未声明 entries()（File System
+ * Access API 实验特性）。运行时存在，这里做最小形状补充，避免 any 污染。
+ */
+declare global {
+  interface FileSystemDirectoryHandle {
+    entries(): AsyncIterableIterator<[string, FileSystemHandle]>
+  }
+}
+
 export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
 export interface WriteResult {
@@ -35,6 +45,31 @@ export interface EditSpec {
 export interface WorkspaceOptions {
   sandboxMode?: SandboxMode
   dbName?: string
+}
+
+/** 真实文件夹工作区的路径标记前缀（showDirectoryPicker 选中的文件夹） */
+export const REAL_DIR_PREFIX = 'file://'
+
+/** 路径是否为真实文件夹工作区路径（file://<name>[/...]） */
+export function isRealDirPath(path: string): boolean {
+  return typeof path === 'string' && path.startsWith(REAL_DIR_PREFIX)
+}
+
+/** 由文件夹名构造真实工作区路径标记：my-project → file://my-project */
+export function realDirPath(name: string): string {
+  return `${REAL_DIR_PREFIX}${name}`
+}
+
+/** 取真实工作区路径的根名（file://my-project → my-project） */
+export function realDirBaseName(path: string): string {
+  return path.slice(REAL_DIR_PREFIX.length).replace(/\/.*$/, '').replace(/\/+$/, '')
+}
+
+/** 由 path 生成稳定 workspaceId：同 path 幂等（虚拟盘符与真实文件夹共用） */
+export function workspaceIdFromPath(path: string): string {
+  let hash = 0
+  for (let i = 0; i < path.length; i += 1) hash = (hash * 31 + path.charCodeAt(i)) | 0
+  return `ws-${(hash >>> 0).toString(36)}`
 }
 
 /** Windows 盘符前缀（C: / C:/ / C:/foo / C:\foo），用作虚拟 FS 的子根分区 */
@@ -248,5 +283,157 @@ export class Workspace {
     if (existing?.kind === 'dir') return
     if (existing?.kind === 'file') throw new Error(`cannot mkdir: ${p} is a file`)
     await this.putRecord({ path: p, kind: 'dir' })
+  }
+}
+
+/**
+ * 真实文件夹工作区 —— 把 FileSystemDirectoryHandle 包成与虚拟 Workspace
+ * 相同的表面（readText/writeText/editText/list/stat/delete/mkdir），
+ * 让 SW 对真实工作区的文件操作直接读写磁盘真实文件。
+ * 路径解析相对句柄根（/foo 即根下 foo），拒绝 '..' 穿越。
+ */
+
+/** 解析句柄内相对路径：/a/b → a/b，拒绝空路径与 '..' 逃逸 */
+function realRelPath(input: string): string {
+  if (typeof input !== 'string' || input.trim() === '') return ''
+  const normalized = input.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '')
+  const out: string[] = []
+  for (const part of normalized.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      if (out.length === 0) throw new Error('path escapes workspace root')
+      out.pop()
+    } else {
+      out.push(part)
+    }
+  }
+  return out.join('/')
+}
+
+/** 沿 rel 逐级 getDirectoryHandle，返回目标目录句柄 */
+async function walkDirs(
+  root: FileSystemDirectoryHandle,
+  rel: string,
+  create = false,
+): Promise<FileSystemDirectoryHandle> {
+  let dir = root
+  for (const seg of rel.split('/')) {
+    if (!seg) continue
+    dir = await dir.getDirectoryHandle(seg, create ? { create: true } : undefined)
+  }
+  return dir
+}
+
+export class RealDirectoryWorkspace {
+  private readonly root: FileSystemDirectoryHandle
+
+  constructor(root: FileSystemDirectoryHandle) {
+    this.root = root
+  }
+
+  async init(): Promise<void> {
+    // 无初始化动作：根句柄即目录根
+  }
+
+  /** List direct children of a dir（path '' 或 '/' 为句柄根）。 */
+  async list(path: string): Promise<FsEntry[]> {
+    const rel = realRelPath(path)
+    const dir = rel ? await walkDirs(this.root, rel) : this.root
+    const entries: FsEntry[] = []
+    for await (const [name, handle] of dir.entries()) {
+      const entryPath = `${rel ? '/' + rel + '/' : '/'}${name}`
+      if (handle.kind === 'file') {
+        const file = await (handle as FileSystemFileHandle).getFile()
+        entries.push({ path: entryPath, kind: 'file', size: file.size, version: 1 })
+      } else {
+        entries.push({ path: entryPath, kind: 'dir' })
+      }
+    }
+    return entries
+  }
+
+  /** Resolve + read real file text. Returns undefined when missing. */
+  async readText(path: string): Promise<string | undefined> {
+    const rel = realRelPath(path)
+    const segs = rel.split('/').filter(Boolean)
+    const fileName = segs.pop()
+    if (!fileName) return undefined
+    const dir = segs.length ? await walkDirs(this.root, segs.join('/')) : this.root
+    try {
+      const fileHandle = await dir.getFileHandle(fileName)
+      const file = await fileHandle.getFile()
+      return await file.text()
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Write (create or overwrite) a real file. Auto-creates parent dirs. */
+  async writeText(path: string, content: string): Promise<WriteResult> {
+    const rel = realRelPath(path)
+    const segs = rel.split('/').filter(Boolean)
+    const fileName = segs.pop()
+    if (!fileName) throw new Error('invalid path')
+    const dir = segs.length ? await walkDirs(this.root, segs.join('/'), true) : this.root
+    const fileHandle = await dir.getFileHandle(fileName, { create: true })
+    const writable = await fileHandle.createWritable()
+    try {
+      await writable.write(content)
+    } finally {
+      await writable.close()
+    }
+    return { version: 1 }
+  }
+
+  /** Edit via oldString/newString on a real file. */
+  async editText(path: string, spec: EditSpec): Promise<EditResult> {
+    const before = await this.readText(path)
+    if (before === undefined) throw new Error(`file not found: ${path}`)
+    if (!spec.oldString) throw new Error('oldString must be non-empty')
+    const after = spec.replaceAll
+      ? before.split(spec.oldString).join(spec.newString)
+      : before.replace(spec.oldString, spec.newString)
+    if (after === before) throw new Error('oldString not found in file content')
+    await this.writeText(path, after)
+    return { before, after, version: 1 }
+  }
+
+  /** Stat a single real path. Returns undefined when missing. */
+  async stat(path: string): Promise<FsEntry | undefined> {
+    const rel = realRelPath(path)
+    const segs = rel.split('/').filter(Boolean)
+    const name = segs.pop()
+    if (!name) return undefined
+    const dir = segs.length ? await walkDirs(this.root, segs.join('/')) : this.root
+    try {
+      const fileHandle = await dir.getFileHandle(name)
+      const file = await fileHandle.getFile()
+      return { path, kind: 'file', size: file.size, version: 1 }
+    } catch {
+      // 不是文件，继续查目录
+    }
+    try {
+      await dir.getDirectoryHandle(name)
+      return { path, kind: 'dir' }
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Delete a real file or directory. */
+  async delete(path: string): Promise<void> {
+    const rel = realRelPath(path)
+    const segs = rel.split('/').filter(Boolean)
+    const name = segs.pop()
+    if (!name) throw new Error('invalid path')
+    const dir = segs.length ? await walkDirs(this.root, segs.join('/')) : this.root
+    await dir.removeEntry(name, { recursive: true })
+  }
+
+  /** Create a directory on the real fs (with ancestors). */
+  async mkdir(path: string): Promise<void> {
+    const rel = realRelPath(path)
+    if (!rel) return
+    await walkDirs(this.root, rel, true)
   }
 }

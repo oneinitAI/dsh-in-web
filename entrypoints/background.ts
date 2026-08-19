@@ -21,7 +21,18 @@ import {
 } from '@/utils/messages'
 import { runAgentLoop } from '@/utils/agent/loop'
 import { buildAgentTools } from '@/utils/agent/tools'
-import { Workspace } from '@/utils/fs/workspace'
+import {
+  isRealDirPath,
+  RealDirectoryWorkspace,
+  realDirBaseName,
+  REAL_DIR_PREFIX,
+  workspaceIdFromPath,
+  Workspace,
+} from '@/utils/fs/workspace'
+import {
+  deleteDirectoryHandle,
+  getDirectoryHandle,
+} from '@/utils/fs/dir-handles'
 import type { Skill } from '@/utils/skills/skill'
 import type { LlmStreamEvent } from '@/utils/plugin/host'
 import { getSettings, patchSettings, type DshSettings } from '@/utils/settings/settings'
@@ -179,9 +190,10 @@ export default defineBackground(() => {
       return
     }
 
-    // ── Side Panel 数据查询（文件树 / skill 库）────────────────
+    // ── Side Panel 数据查询（文件树 / skill 库 / 真实工作区）────────────────
     if (topic === 'panel-query') {
-      const { cmd, path } = (message as { payload?: { cmd?: string; path?: string } }).payload ?? {}
+      const { cmd, path, title } =
+        (message as { payload?: { cmd?: string; path?: string; title?: string } }).payload ?? {}
       void (async () => {
         try {
           if (cmd === 'list-files') {
@@ -189,11 +201,33 @@ export default defineBackground(() => {
             const root = await ws.list('/')
             sendResponse({ ok: true, entries: root })
           } else if (cmd === 'read-file' && path) {
+            // 真实文件夹工作区路径（file://...）走真实 handle 读取；其余走虚拟 Workspace
+            if (isRealDirPath(path)) {
+              const resolved = await resolveRealDirectory(path)
+              if (!resolved) {
+                sendResponse({ ok: false, error: `real directory not found: ${path}` })
+                return
+              }
+              const rws = new RealDirectoryWorkspace(resolved.handle)
+              const content = await rws.readText(resolved.rel)
+              sendResponse({ ok: true, content: content ?? null })
+              return
+            }
             const ws = await getQueryWs()
             const content = await ws.readText(path)
             sendResponse({ ok: true, content: content ?? null })
           } else if (cmd === 'list-skills') {
             sendResponse({ ok: true, skills })
+          } else if (cmd === 'create-real-workspace' && path) {
+            // 真实文件夹工作区：句柄已由 side panel 经 dir-handles 存入 IndexedDB，
+            // 这里校验 handle 存在后复用 workspace.create 建记录（幂等）。
+            const handle = await getDirectoryHandle(workspaceIdFromPath(path))
+            if (!handle) {
+              sendResponse({ ok: false, error: `directory handle not found: ${path}（请先在侧栏选择文件夹）` })
+              return
+            }
+            const result = await dshWorkspaceCreate({ path, title })
+            sendResponse(result.ok ? { ok: true } : { ok: false, error: (result.error)?.message ?? 'create failed' })
           } else {
             sendResponse({ ok: false, error: `unknown query: ${cmd}` })
           }
@@ -425,6 +459,8 @@ export default defineBackground(() => {
 
   /** 固定单工作区（本地 IndexedDB 虚拟 FS 映射为 harness 的一个 workspace 实体） */
   const DSH_WORKSPACE_ID = 'dsh-in-web'
+  /** 网页对话工作区：承载网页版 chat.deepseek.com 的会话数据（默认工作区） */
+  const DSH_WEB_CHAT_WORKSPACE_TITLE = '网页对话'
   const DSH_WORKSPACE_CREATED_AT = new Date().toISOString()
 
   /** 固定模型目录（llm.models / session.models 共用；参考 utils/bridge/protocol.ts 的模型面） */
@@ -498,13 +534,6 @@ export default defineBackground(() => {
     }
   }
 
-  /** 由 path 生成稳定 workspaceId：同 path 重复 create 幂等返回同一 id */
-  function workspaceIdFromPath(path: string): string {
-    let hash = 0
-    for (let i = 0; i < path.length; i += 1) hash = (hash * 31 + path.charCodeAt(i)) | 0
-    return `ws-${(hash >>> 0).toString(36)}`
-  }
-
   /**
    * 虚拟盘符集合（Windows 常见盘符）。浏览器沙盒内是逻辑分区——
    * 全部落在同一个 IndexedDB Workspace，按 `C:/` 前缀分区。
@@ -546,11 +575,54 @@ export default defineBackground(() => {
       })
   }
 
+  /**
+   * 把真实工作区浏览路径解析为 { workspace 记录, 目录句柄, 相对路径 }。
+   * 路径形如 file://<name>[/sub...]：先匹配工作区记录（path 前缀），
+   * 再从 IndexedDB 恢复该 workspaceId 的 FileSystemDirectoryHandle。
+   * 非真实路径返回 null（走虚拟 Workspace 逻辑）。
+   */
+  async function resolveRealDirectory(
+    path: string,
+  ): Promise<{ workspace: DshWorkspaceRecord; handle: FileSystemDirectoryHandle; rel: string } | null> {
+    if (!isRealDirPath(path)) return null
+    const records = await readWorkspaces()
+    const workspace = records.find(
+      (r) => r.path.startsWith(REAL_DIR_PREFIX) && (path === r.path || path.startsWith(`${r.path}/`)),
+    )
+    if (!workspace) return null
+    const handle = await getDirectoryHandle(workspace.workspaceId)
+    if (!handle) return null
+    const rel = path.slice(workspace.path.length).replace(/^\/+/, '')
+    return { workspace, handle, rel }
+  }
+
+  /**
+   * 构造真实工作区浏览的面包屑链：file://<name> 为根段（跳回文件夹根），
+   * 其余段（sub/...）逐级累积。
+   */
+  function buildRealCrumbs(
+    root: string,
+    rel: string,
+  ): { name: string; path: string; hidden: false }[] {
+    const crumbs: { name: string; path: string; hidden: false }[] = [
+      { name: realDirBaseName(root), path: root, hidden: false },
+    ]
+    if (!rel) return crumbs
+    let acc = root
+    for (const seg of rel.split('/').filter(Boolean)) {
+      acc += '/' + seg
+      crumbs.push({ name: seg, path: acc, hidden: false })
+    }
+    return crumbs
+  }
+
   /** path 兜底：缺失时回落虚拟根路径；虚拟路径标识（<...>）原样保留 */
   function normalizeWorkspacePath(path: unknown): string {
     if (typeof path !== 'string' || !path.trim()) return `<${DSH_WORKSPACE_ID}>`
     const trimmed = path.trim()
     if (trimmed.startsWith('<')) return trimmed
+    // 真实文件夹工作区路径标记（file://<name>[/...]）：原样保留，不做盘符/斜杠改写
+    if (trimmed.startsWith(REAL_DIR_PREFIX)) return trimmed
     // 盘符路径（C:/foo / C:\foo / C:）：保留盘符前缀，不再强制加 '/'
     if (/^[A-Za-z]:/.test(trimmed)) return normalizeDrivePath(trimmed)
     return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
@@ -1085,6 +1157,16 @@ export default defineBackground(() => {
   // ── workspace.*（chrome.storage.local 真实持久化的工作区记录）────
   async function dshWorkspaceList(): Promise<DshRpcResult> {
     const records = await readWorkspaces()
+    // 确保「网页对话」工作区始终在列（承载网页版会话；无记录时作为默认）
+    if (records.length === 0) {
+      return {
+        ok: true,
+        value: {
+          items: [toWorkspaceView(await thisWebChatWorkspace())],
+          archivedSessionIds: [],
+        },
+      }
+    }
     return { ok: true, value: { items: records.map(toWorkspaceView), archivedSessionIds: [] } }
   }
 
@@ -1131,6 +1213,8 @@ export default defineBackground(() => {
       return { ok: false, error: { code: 'workspace-not-found', message: `workspace not found: ${workspaceId}`, details: { workspaceId } } }
     }
     await writeWorkspaces(next)
+    // 真实文件夹工作区：删除记录时同步清理 IndexedDB 里的目录句柄
+    await deleteDirectoryHandle(workspaceId)
     return { ok: true, value: { deleted: true } }
   }
 
@@ -1141,7 +1225,7 @@ export default defineBackground(() => {
     const records = await readWorkspaces()
     // 缺省参数（UI 有时只带 sessionId）兜底：把会话并入首工作区，避免进入流程中断
     const target = records.find((r) => r.workspaceId === workspaceId) ?? records[0]
-    if (!target) return { ok: true, value: { workspace: toWorkspaceView(await thisFallbackWorkspace()) } }
+    if (!target) return { ok: true, value: { workspace: toWorkspaceView(await thisWebChatWorkspace()) } }
     let sessionIds = target.sessionIds.filter((id) => id !== sessionId)
     const beforeSessionId = typeof p.beforeSessionId === 'string' && p.beforeSessionId ? p.beforeSessionId : undefined
     if (sessionId) {
@@ -1157,12 +1241,12 @@ export default defineBackground(() => {
     return { ok: true, value: { workspace: toWorkspaceView(next) } }
   }
 
-  /** 无任何工作区记录时的兜底视图（进入工作区流程不因空清单中断） */
-  async function thisFallbackWorkspace(): Promise<DshWorkspaceRecord> {
+  /** 网页对话工作区（承载网页版会话；无任何工作区记录时的默认/兜底） */
+  async function thisWebChatWorkspace(): Promise<DshWorkspaceRecord> {
     return {
       workspaceId: DSH_WORKSPACE_ID,
       path: `<${DSH_WORKSPACE_ID}>`,
-      title: DSH_WORKSPACE_ID,
+      title: DSH_WEB_CHAT_WORKSPACE_TITLE,
       sessionIds: [],
       createdAt: DSH_WORKSPACE_CREATED_AT,
       updatedAt: new Date().toISOString(),
@@ -1780,7 +1864,6 @@ export default defineBackground(() => {
       const p = (payload ?? {}) as { path?: unknown }
       const rawPath = typeof p.path === 'string' && p.path ? p.path : '/'
       try {
-        const ws = await getQueryWs()
         // 根层：返回盘符列表作为目录 entries，home '/'、crumbs 空
         if (rawPath === '/' || rawPath === '') {
           return {
@@ -1794,6 +1877,28 @@ export default defineBackground(() => {
             },
           }
         }
+        // 真实文件夹工作区（file://<name>[/...]）：走真实 handle entries() 列出目录
+        const real = await resolveRealDirectory(rawPath)
+        if (real) {
+          const rws = new RealDirectoryWorkspace(real.handle)
+          const entries = await rws.list(real.rel)
+          return {
+            ok: true,
+            value: {
+              path: rawPath,
+              home: real.workspace.path,
+              crumbs: buildRealCrumbs(real.workspace.path, real.rel),
+              entries: entries.map((e) => {
+                const name = e.path.split('/').filter(Boolean).pop() ?? e.path
+                // 相对句柄根的子路径接到工作区根前缀上（file://<name>/<sub>...）
+                const fullPath = `${real.workspace.path}${e.path}`
+                return { name, path: fullPath, hidden: false }
+              }),
+              truncated: false,
+            },
+          }
+        }
+        const ws = await getQueryWs()
         const path = normalizeDrivePath(rawPath)
         const entries = await ws.list(path)
         return {
@@ -1823,20 +1928,29 @@ export default defineBackground(() => {
     // host.pickDirectory：工作区目录选择对话框。浏览器无真实目录选择器，
     // 返回默认盘符路径 C:（与 host.describe 的 cwd 同属虚拟 FS），
     // 让「选择目录 → 创建工作区」流程不被 null（用户取消）中断。
+    // 真实文件夹工作区由 side panel 的「打开文件夹建立工作区」按钮
+    // （window.showDirectoryPicker）建立，走 panel-query create-real-workspace。
     'host.pickDirectory': () => ({ ok: true, value: { path: DSH_DRIVES[0] ?? 'C:' } }),
     // host.createDirectory：新建文件夹（对齐 hostCreateDirectoryValueSchema：
-    // request { path, name }，value { path }）。在 Workspace 里真实 mkdir
-    // 该目录（含父级），让新建后的目录树刷新能看到；失败时仍返回合成绝对路径
-    // 兜底，避免打断 UI 浏览。
+    // request { path, name }，value { path }）。真实工作区路径走真实 handle mkdir；
+    // 虚拟盘符路径在 Workspace 里真实 mkdir（含父级），让新建后的目录树刷新能看到；
+    // 失败时仍返回合成绝对路径兜底，避免打断 UI 浏览。
     'host.createDirectory': async (payload) => {
       const p = (payload ?? {}) as { path?: unknown; name?: unknown }
-      const path = typeof p.path === 'string' && p.path ? normalizeDrivePath(p.path) : ''
+      const rawPath = typeof p.path === 'string' && p.path ? p.path : ''
       const name = typeof p.name === 'string' && p.name ? p.name.trim() : ''
-      if (!path || !name) return { ok: true, value: { path: '/' } }
-      const target = `${path}/${name}`
+      if (!rawPath || !name) return { ok: true, value: { path: '/' } }
+      const target = `${rawPath}/${name}`
       try {
+        const real = await resolveRealDirectory(rawPath)
+        if (real) {
+          const rws = new RealDirectoryWorkspace(real.handle)
+          const rel = real.rel ? `${real.rel}/${name}` : name
+          await rws.mkdir(rel)
+          return { ok: true, value: { path: target } }
+        }
         const ws = await getQueryWs()
-        await ws.mkdir(target)
+        await ws.mkdir(normalizeDrivePath(target))
       } catch {
         // 创建失败静默：仍返回合成路径，避免目录浏览流程中断
       }

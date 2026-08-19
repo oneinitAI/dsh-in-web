@@ -1000,6 +1000,32 @@ body {
   text-transform: uppercase;
 }
 
+/* 设置组内说明文字 */
+.settings__hint {
+  margin: 0;
+  font-size: calc(var(--dsh-font-size) - 2px);
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 真实文件夹工作区状态提示 */
+.ws-note {
+  font-size: calc(var(--dsh-font-size) - 2px);
+  line-height: 1.5;
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+
+.ws-note--ok {
+  background: var(--dsw-alias-state-success-tertiary);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.ws-note--err {
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--dsw-alias-state-error-primary);
+}
+
 .setting-row {
   display: flex;
   align-items: center;
