@@ -37,6 +37,7 @@ import type { Skill } from '@/utils/skills/skill'
 import type { LlmStreamEvent } from '@/utils/plugin/host'
 import { getSettings, patchSettings, type DshSettings } from '@/utils/settings/settings'
 import { DSH_AGENT_PRESET_CONTENTS } from '@/utils/agent-presets/contents'
+import { presetSystemPrompt } from '@/utils/agent-presets/persona'
 import {
   ChromeSettingsStorageBackend,
   createOfficialSettingsProvider,
@@ -1022,6 +1023,17 @@ export default defineBackground(() => {
     // 3) 多轮上下文：把该会话历史消息（含刚加入的 user）传给 runStream。
     //    dsh 会话自带完整历史，web 侧不再复用旧 chat_session（避免服务端历史重复）。
     const history = sessionHistoryMessages(rec)
+    // 3.1) Agent 预设 persona 注入（Layer 0+1）：会话选了 agent 预设时，把该预设的
+    //      persona（+ 能力说明 + 工具提示）作为 system message 放到历史最前；
+    //      无预设走「网页对话」通用 persona。仅在历史没有 system 前缀时注入，
+    //      避免多轮重复（sessionHistoryMessages 只产出 user/assistant，此处为防御）。
+    const messages: Message[] =
+      history.length > 0 && history[0]?.role === 'system'
+        ? history
+        : [
+            { role: 'system', content: presetSystemPrompt(rec.agentPreset, { cwd: rec.cwd }) },
+            ...history,
+          ]
     currentSessionId = undefined
 
     // 4) 订阅流式事件，边收边实时回显 assistant/message（方式 B：同 messageId
@@ -1106,7 +1118,7 @@ export default defineBackground(() => {
       }
     }
 
-    void runStream(history, currentReasoning, currentSearch, {
+    void runStream(messages, currentReasoning, currentSearch, {
       onEvent: (ev, round) => {
         if (round !== currentRound) {
           // 进入新一轮（工具调用场景才有第 2+ 轮）：上一轮结束，新一轮打开
